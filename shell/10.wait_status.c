@@ -20,6 +20,9 @@ int main(int argc,char*argv[]){
     }else{
         int status;
         //waitpid可以获取进程退出状态
+        //注意这里拿到的status是一个编码后的状态值，不能直接printf
+        //要使用宏，也就是要用专门的工具去使用他
+
         if(waitpid(pid,&status,0)==-1){
             perror("waitpid");
             return 1;

@@ -1,0 +1,20 @@
+# 忽略所有，只保留 C 代码
+*
+!*.c
+!*.h
+!.gitignore
+
+# 忽略编译产物
+*.o
+*.out
+*.exe
+atexit_demo
+exit_vs-exit
+fork_basic
+fork_file-offset
+fork_memory
+fork_race
+fork_stdio_buffer
+fork_sync_pipe
+13.orphan_demon
+.vscode/

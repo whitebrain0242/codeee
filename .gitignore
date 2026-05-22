@@ -1,13 +1,4 @@
-# 忽略所有，只保留 C 代码
-*
-!*.c
-!*.h
-!.gitignore
-
-# 忽略编译产物
-*.o
-*.out
-*.exe
+# 忽略编译出来的可执行文件（绿色文件）
 atexit_demo
 exit_vs-exit
 fork_basic
@@ -16,5 +7,12 @@ fork_memory
 fork_race
 fork_stdio_buffer
 fork_sync_pipe
-13.orphan_demon
+13.orphan_demo
+
+# 忽略编译中间文件
+*.o
+*.out
+
+# 忽略编辑器配置
 .vscode/
+.idea/

@@ -61,6 +61,9 @@ static constexpr size_t IO_BUFFER_SIZE = 256 * 1024;
 
 static std::mutex g_logMutex;
 
+
+/*工具函数*/
+//1.日志：类型+时间+内容
 static std::string nowTime() {
     auto now = std::chrono::system_clock::now();
     std::time_t t = std::chrono::system_clock::to_time_t(now);
@@ -73,7 +76,7 @@ static std::string nowTime() {
 
 static void logInfo(const std::string& msg) {
     std::lock_guard<std::mutex> lock(g_logMutex);
-    // 简单“界面美观”：用 ANSI 颜色区分日志级别。
+    
     std::cout << "\033[1;32m[INFO]\033[0m " << nowTime() << "  " << msg << std::endl;
 }
 
@@ -86,6 +89,8 @@ static void logError(const std::string& msg) {
     std::lock_guard<std::mutex> lock(g_logMutex);
     std::cerr << "\033[1;31m[ERR ]\033[0m " << nowTime() << "  " << msg << std::endl;
 }
+
+//2.字符串处理
 
 static std::string trim(const std::string& s) {
     size_t b = 0;
@@ -106,7 +111,7 @@ static std::string baseName(const std::string& path) {
     return path.substr(pos + 1);
 }
 
-// RAII 文件描述符封装：对象析构时自动 close，避免忘记释放 socket/file fd。
+
 class UniqueFd {
 public:
     UniqueFd() = default;
@@ -146,7 +151,7 @@ public:
 private:
     int fd_ = -1;
 };
-
+//3.网络收发
 static bool sendAll(int fd, const char* data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -181,7 +186,8 @@ static bool recvLine(int fd, std::string& line) {
     }
     return true;
 }
-
+/*安全相关*/
+//1.
 static bool pathInsideRoot(const fs::path& root, const fs::path& target) {
     std::error_code ec;
     fs::path rel = fs::relative(target, root, ec);
@@ -316,6 +322,30 @@ private:
     UniqueFd pasvListenFd_;
     int pasvPort_ = 0;
 
+    //2.
+    fs::path resolvePath(const std::string& ftpPath) {
+        std::string arg = trim(ftpPath);
+        fs::path combined;
+        if (arg.empty()) {
+            combined = root_ / cwdRel_;
+        } else if (!arg.empty() && arg[0] == '/') {
+            combined = root_ / arg.substr(1);
+        } else {
+            combined = root_ / cwdRel_ / arg;
+        }
+
+        std::error_code ec;
+        fs::path normalized = fs::weakly_canonical(combined, ec);
+        if (ec) {
+            normalized = fs::absolute(combined).lexically_normal();
+        }
+
+        if (!pathInsideRoot(root_, normalized)) {
+            throw std::runtime_error("path escapes FTP root");
+        }
+        return normalized;
+    }
+
     void parseCommand(const std::string& line, std::string& cmd, std::string& arg) {
         auto pos = line.find(' ');
         if (pos == std::string::npos) {
@@ -354,31 +384,6 @@ private:
         return p;
     }
 
-    // 将 FTP 虚拟路径转换为服务器真实路径。
-    // 关键安全点：转换后必须仍在 root_ 内，防止客户端使用 ../../etc/passwd 越界访问。
-    fs::path resolvePath(const std::string& ftpPath) {
-        std::string arg = trim(ftpPath);
-        fs::path combined;
-        if (arg.empty()) {
-            combined = root_ / cwdRel_;
-        } else if (!arg.empty() && arg[0] == '/') {
-            combined = root_ / arg.substr(1);
-        } else {
-            combined = root_ / cwdRel_ / arg;
-        }
-
-        std::error_code ec;
-        fs::path normalized = fs::weakly_canonical(combined, ec);
-        if (ec) {
-            // weakly_canonical 对不存在的新文件通常也能处理；此处兜底做 lexically_normal。
-            normalized = fs::absolute(combined).lexically_normal();
-        }
-
-        if (!pathInsideRoot(root_, normalized)) {
-            throw std::runtime_error("path escapes FTP root");
-        }
-        return normalized;
-    }
 
     std::string toVirtualPath(const fs::path& real) {
         std::error_code ec;
@@ -389,16 +394,7 @@ private:
         return "/" + s;
     }
 
-    void handleUSER(const std::string&) {
-        // 教学项目常采用匿名登录，避免陷入用户认证细节。
-        // 真正生产环境应接入 PAM、系统用户或专门账号数据库。
-        reply(331, "User name ok, need password.");
-    }
 
-    void handlePASS(const std::string&) {
-        loggedIn_ = true;
-        reply(230, "Login successful.");
-    }
 
     void handleFEAT() {
         // 多行响应格式：第一行 code-，最后一行 code 空格。
@@ -413,6 +409,22 @@ private:
         replyRaw(oss.str());
     }
 
+
+//FTP协议函数
+//1.登陆
+
+    void handleUSER(const std::string&) {
+        reply(331, "User name ok, need password.");
+    }
+
+    void handlePASS(const std::string&) {
+        loggedIn_ = true;
+        reply(230, "Login successful.");
+    }
+
+    
+
+    //2.目录
     void handlePWD() {
         requireLogin();
         reply(257, "\"" + toVirtualPath(currentRealPath()) + "\" is current directory.");
@@ -430,6 +442,37 @@ private:
         if (ec || rel.empty()) rel = ".";
         cwdRel_ = rel;
         reply(250, "Directory changed to " + toVirtualPath(target));
+    }
+
+    //3.文件列表类
+    void handleLIST(const std::string& arg, bool namesOnly) {
+        requireLogin();
+        fs::path target = resolvePath(arg);
+        if (!fs::exists(target)) {
+            reply(550, "Path not found.");
+            return;
+        }
+
+        reply(150, "Opening ASCII mode data connection for file list.");
+        UniqueFd dataFd = acceptDataConnection();
+
+        std::ostringstream listing;
+        if (fs::is_directory(target)) {
+            for (const auto& entry : fs::directory_iterator(target)) {
+                if (namesOnly) {
+                    listing << entry.path().filename().string() << "\r\n";
+                } else {
+                    listing << formatListLine(entry);
+                }
+            }
+        } else {
+            if (namesOnly) listing << target.filename().string() << "\r\n";
+            else listing << formatListLine(fs::directory_entry(target));
+        }
+
+        std::string data = listing.str();
+        sendString(dataFd.get(), data);
+        reply(226, "Transfer complete.");
     }
 
     void handleTYPE(const std::string& arg) {
@@ -554,35 +597,7 @@ private:
         return UniqueFd(dataFd);
     }
 
-    void handleLIST(const std::string& arg, bool namesOnly) {
-        requireLogin();
-        fs::path target = resolvePath(arg);
-        if (!fs::exists(target)) {
-            reply(550, "Path not found.");
-            return;
-        }
-
-        reply(150, "Opening ASCII mode data connection for file list.");
-        UniqueFd dataFd = acceptDataConnection();
-
-        std::ostringstream listing;
-        if (fs::is_directory(target)) {
-            for (const auto& entry : fs::directory_iterator(target)) {
-                if (namesOnly) {
-                    listing << entry.path().filename().string() << "\r\n";
-                } else {
-                    listing << formatListLine(entry);
-                }
-            }
-        } else {
-            if (namesOnly) listing << target.filename().string() << "\r\n";
-            else listing << formatListLine(fs::directory_entry(target));
-        }
-
-        std::string data = listing.str();
-        sendString(dataFd.get(), data);
-        reply(226, "Transfer complete.");
-    }
+    
 
     void handleRETR(const std::string& arg) {
         requireLogin();
@@ -831,7 +846,7 @@ static std::string peerToString(const sockaddr_in& addr) {
 }
 
 int main(int argc, char* argv[]) {
-    // 避免客户端断开时 send 触发 SIGPIPE 导致服务器进程退出。
+    
     std::signal(SIGPIPE, SIG_IGN);
 
     fs::path root = "./ftp_root";
@@ -872,8 +887,6 @@ int main(int argc, char* argv[]) {
 
             std::string peer = peerToString(cli);
 
-            // 每个控制连接一个线程：控制连接生命周期较长，且每个会话都有独立状态，
-            // 例如当前目录、REST 偏移量、PASV 监听 fd 等。
             std::thread([clientFd, root, peer]() mutable {
                 FtpSession session(clientFd, root, peer);
                 session.run();

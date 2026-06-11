@@ -1,25 +1,3 @@
-// linux_ftp_client_cpp17.cpp
-// ------------------------------------------------------------
-// 一个教学型 Linux FTP 客户端，配合你前面的 FTP 服务器使用。
-// 支持：
-//   1. 控制连接连接服务器 2100 端口
-//   2. USER / PASS 匿名登录
-//   3. PASV 被动模式
-//   4. LIST 获取文件列表
-//   5. RETR 下载文件
-//   6. STOR 上传文件
-//   7. PWD / CWD / QUIT
-//
-// 编译：
-//   g++ -std=c++17 -Wall -Wextra -O2 linux_ftp_client_cpp17.cpp -o ftp_client
-//
-// 运行：
-//   ./ftp_client 127.0.0.1 2100
-//
-// 注意：
-//   这是 Linux 版本，使用 POSIX socket API。
-// ------------------------------------------------------------
-
 #include <arpa/inet.h>
 #include <algorithm>
 #include <cctype>
@@ -35,9 +13,6 @@
 #include <unistd.h>
 #include <vector>
 
-// RAII 文件描述符封装。
-// 作用：对象析构时自动 close(fd)，避免 socket 泄漏。
-// 这和你服务端里的 UniqueFd 思路一致。
 class UniqueFd {
 public:
     UniqueFd() = default;
@@ -83,8 +58,6 @@ private:
     int fd_ = -1;
 };
 
-// 确保把 len 字节全部发送出去。
-// send 不保证一次就发完，所以要循环发送。
 static bool sendAll(int fd, const char* data, size_t len) {
     size_t sent = 0;
 
@@ -107,19 +80,14 @@ static bool sendAll(int fd, const char* data, size_t len) {
 
     return true;
 }
-
+//将加了/r/n的命令发送给服务器
 static bool sendString(int fd, const std::string& s) {
     return sendAll(fd, s.data(), s.size());
 }
 
-// 从控制连接读取一行 FTP 响应。
-// FTP 协议行结尾一般是 \r\n。
-// 这里忽略 \r，读到 \n 结束。
 static bool recvLine(int fd, std::string& line) {
     line.clear();
-
     char c = '\0';
-
     while (true) {
         ssize_t n = ::recv(fd, &c, 1, 0);
 
@@ -150,17 +118,15 @@ static bool recvLine(int fd, std::string& line) {
     return true;
 }
 
-// 建立 TCP 连接。
-// host 可以是 127.0.0.1，也可以是域名。
-// 这里为了配合 PASV，限制使用 IPv4。
 static UniqueFd connectTcp(const std::string& host, int port) {
+    //指定希望得到的地址类型
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
     addrinfo* result = nullptr;
     std::string portText = std::to_string(port);
-
+//地址解析：一个域名对应多个IP                                  要求
     int rc = ::getaddrinfo(host.c_str(), portText.c_str(), &hints, &result);
     if (rc != 0) {
         throw std::runtime_error(
@@ -169,7 +135,7 @@ static UniqueFd connectTcp(const std::string& host, int port) {
     }
 
     UniqueFd fd;
-
+    //遍历地址列表，尝试创建socket
     for (addrinfo* p = result; p != nullptr; p = p->ai_next) {
         int rawFd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (rawFd < 0) {
@@ -179,7 +145,7 @@ static UniqueFd connectTcp(const std::string& host, int port) {
         fd.reset(rawFd);
 
         if (::connect(fd.get(), p->ai_addr, p->ai_addrlen) == 0) {
-            ::freeaddrinfo(result);
+            ::freeaddrinfo(result);//释放地列表
             return fd;
         }
     }
@@ -192,34 +158,10 @@ static UniqueFd connectTcp(const std::string& host, int port) {
 }
 
 struct FtpReply {
-    int code = 0;
+    int code = 0;//状态码和原始行
     std::vector<std::string> lines;
 };
 
-// 判断某一行是否是多行响应的结束行。
-// FTP 多行响应格式类似：
-//   211-Features:
-//    PASV
-//   211 End
-static bool isReplyCodeLine(const std::string& line, int code, char sep) {
-    if (line.size() < 4) {
-        return false;
-    }
-
-    if (line[0] != static_cast<char>('0' + code / 100)) {
-        return false;
-    }
-
-    if (line[1] != static_cast<char>('0' + (code / 10) % 10)) {
-        return false;
-    }
-
-    if (line[2] != static_cast<char>('0' + code % 10)) {
-        return false;
-    }
-
-    return line[3] == sep;
-}
 
 class FtpClient {
 public:
@@ -235,9 +177,9 @@ public:
         requireCode(hello, 220, "server greeting");
     }
 
+    //登陆：传入用户名和密码，然后发送命令获取服务端响应，如果是331就用户名成功，230密码成功
     void login(const std::string& user, const std::string& pass) {
         FtpReply r1 = command("USER " + user);
-
         // 有些 FTP 服务器 USER 后直接 230 登录成功。
         // 你的服务器是 331，需要继续 PASS。
         if (r1.code == 230) {
@@ -267,13 +209,7 @@ public:
     }
 
     std::string list(const std::string& path = "") {
-        // FTP 被动模式的典型流程：
-        //   1. 控制连接发送 PASV
-        //   2. 解析服务器返回的数据端口
-        //   3. 客户端主动连接这个数据端口
-        //   4. 控制连接发送 LIST
-        //   5. 数据连接接收目录数据
-        //   6. 控制连接读取 226 完成响应
+        
         UniqueFd dataFd = openPassiveDataConnection();
 
         std::string cmd = path.empty() ? "LIST" : "LIST " + path;
@@ -311,24 +247,25 @@ public:
 
         FtpReply done = readReply();
         requireCode(done, 226, "LIST completion");
-
         return listing;
     }
-
+//                            服务器路径                          本地保存的文件名
     void download(const std::string& remoteFile, const std::string& localFile) {
         UniqueFd dataFd = openPassiveDataConnection();
 
+        //开始下载
         FtpReply start = command("RETR " + remoteFile);
         if (start.code >= 400) {
             throw std::runtime_error("RETR failed");
         }
 
+        //输出文件流，以二进制打开本地文件
         std::ofstream out(localFile, std::ios::binary);
-        if (!out) {
+        if (!out) {//无法创建或者写入
             throw std::runtime_error("cannot open local file for writing: " + localFile);
         }
 
-        char buffer[128 * 1024];
+        char buffer[128 * 1024];//128KB缓冲区
 
         while (true) {
             ssize_t n = ::recv(dataFd.get(), buffer, sizeof(buffer), 0);
@@ -346,7 +283,7 @@ public:
             if (n == 0) {
                 break;
             }
-
+            //将buffer前n的字节写进去
             out.write(buffer, n);
 
             if (!out) {
@@ -364,6 +301,7 @@ public:
     }
 
     void upload(const std::string& localFile, const std::string& remoteFile) {
+        //输入文件流，用来从磁盘里面读取数据
         std::ifstream in(localFile, std::ios::binary);
         if (!in) {
             throw std::runtime_error("cannot open local file for reading: " + localFile);
@@ -418,6 +356,7 @@ private:
     std::string serverHost_;
     bool verbose_ = true;
 
+    //读取命令行，并且把它分开
     FtpReply readReply() {
         std::string line;
 
@@ -425,6 +364,7 @@ private:
             throw std::runtime_error("control connection closed");
         }
 
+        //判断响应码
         if (
             line.size() < 3 ||
             !std::isdigit(static_cast<unsigned char>(line[0])) ||
@@ -434,41 +374,18 @@ private:
             throw std::runtime_error("bad FTP reply: " + line);
         }
 
+        //分离响应吗和语句
         FtpReply reply;
         reply.code = std::stoi(line.substr(0, 3));
         reply.lines.push_back(line);
 
-        if (verbose_) {
+        if (verbose_) {//开启日志输出
             std::cout << "< " << line << "\n";
-        }
-
-        // 处理 FTP 多行响应。
-        // 例如：
-        //   211-Features:
-        //    PASV
-        //    SIZE
-        //   211 End
-        if (line.size() >= 4 && line[3] == '-') {
-            while (true) {
-                if (!recvLine(controlFd_.get(), line)) {
-                    throw std::runtime_error("control connection closed in multiline reply");
-                }
-
-                reply.lines.push_back(line);
-
-                if (verbose_) {
-                    std::cout << "< " << line << "\n";
-                }
-
-                if (isReplyCodeLine(line, reply.code, ' ')) {
-                    break;
-                }
-            }
         }
 
         return reply;
     }
-
+//向服务器发送命令
     FtpReply command(const std::string& cmd) {
         if (verbose_) {
             std::cout << "> " << cmd << "\n";
@@ -480,41 +397,38 @@ private:
 
         return readReply();
     }
-
+//验证ftp响应吗是否符合预期    响应吗和响应文本      预期的响应吗         错误信息的描述文字
     void requireCode(const FtpReply& reply, int expected, const std::string& what) {
-        if (reply.code != expected) {
+        if (reply.code != expected) {//如果实际上受到的响应吗和期望值不一样，错误处理
             std::ostringstream oss;
             oss << what << " expected " << expected << ", got " << reply.code;
             throw std::runtime_error(oss.str());
         }
     }
-
+//在PASV形式中，通过数据连接，解析出数据连接的IP和端口，然后主动连接该端口，返回数据连接的socket
     UniqueFd openPassiveDataConnection() {
-        FtpReply r = command("PASV");
+        FtpReply r = command("PASV");//服务器返回之后的响应吗加文本
         requireCode(r, 227, "PASV");
 
-        std::string all;
-        for (const auto& line : r.lines) {
-            all += line;
-            all += "\n";
+        if (r.lines.empty()) {
+        throw std::runtime_error("empty PASV reply");
         }
 
-        // PASV 响应格式：
-        //   227 Entering Passive Mode (h1,h2,h3,h4,p1,p2).
-        //
-        // 端口计算：
-        //   port = p1 * 256 + p2
-        auto left = all.find('(');
-        auto right = all.find(')', left == std::string::npos ? 0 : left);
+        
+        const std::string& replyLine = r.lines[0];   // 直接取第一行
+        auto left = replyLine.find('(');
+        auto right = replyLine.find(')', left); 
 
         if (left == std::string::npos || right == std::string::npos || right <= left) {
-            throw std::runtime_error("cannot parse PASV reply: " + all);
+            throw std::runtime_error("cannot parse PASV reply: " + replyLine);
         }
 
-        std::string inside = all.substr(left + 1, right - left - 1);
-
+        //得到服务器的四个字节，服务器开放的数据端口号
+        std::string inside = replyLine.substr(left + 1, right - left - 1);
+        //所有逗号替换成空格
         std::replace(inside.begin(), inside.end(), ',', ' ');
 
+        //istringstream 允许我们使用 >> 运算符依次读取以空白分隔的六个整数，赋值给变量 h1~p2
         std::istringstream iss(inside);
 
         int h1 = 0;
@@ -528,14 +442,12 @@ private:
             throw std::runtime_error("bad PASV numbers: " + inside);
         }
 
+        //得到了数据连接的服务端ip和端口
         std::ostringstream ip;
         ip << h1 << "." << h2 << "." << h3 << "." << h4;
-
         int port = p1 * 256 + p2;
-
         std::string dataHost = ip.str();
 
-        // 如果服务器返回 0.0.0.0，就退回使用控制连接的 host。
         if (dataHost == "0.0.0.0") {
             dataHost = serverHost_;
         }
@@ -543,7 +455,6 @@ private:
         if (verbose_) {
             std::cout << "# data connection: " << dataHost << ":" << port << "\n";
         }
-
         return connectTcp(dataHost, port);
     }
 };
@@ -559,14 +470,14 @@ static std::string baseName(const std::string& path) {
 }
 
 // 简单命令行切分。
-// 注意：这个版本不支持带空格的文件名。
-// 这是教学版客户端，先保持简单。
 static std::vector<std::string> splitWords(const std::string& line) {
+    //输入字符串流
     std::istringstream iss(line);
 
     std::vector<std::string> parts;
     std::string s;
 
+    //每次读取一个单词
     while (iss >> s) {
         parts.push_back(s);
     }

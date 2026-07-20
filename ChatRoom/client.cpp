@@ -34,7 +34,21 @@ int connect_to_server(const std::string& ip, int port) {
 
     return sock_fd;
 }
+//v1:新增send_all函数
+bool send_all(int fd,const std::string& data){
+    size_t sent_total=0;
+    while(sent_total<data.size()){
+        ssize_t n=send(fd,data.data()+sent_total,data.size()-sent_total,MSG_NOSIGNAL);
+        if(n>0){
+            sent_total+=static_cast<size_t>(n);
+        }else if(n==-1){
+            std::cerr << "send failed: " << strerror(errno) << std::endl;
+            return false;
+        }
 
+    }
+    return true;
+}
 int main(int argc, char* argv[]) {
     std::string ip = "127.0.0.1";
     int port = 9000;
@@ -44,7 +58,12 @@ int main(int argc, char* argv[]) {
     }
 
     if (argc >= 3) {
-        port = std::stoi(argv[2]);
+       try {
+            port = std::stoi(argv[2]);
+        } catch (...) {
+            std::cerr << "invalid port" << std::endl;
+            return 1;
+        }
     }
 
     int sock_fd = connect_to_server(ip, port);
@@ -89,11 +108,8 @@ int main(int argc, char* argv[]) {
 
             line += "\n";
 
-            ssize_t n = send(sock_fd, line.data(), line.size(), 0);
-            if (n == -1) {
-                std::cerr << "send failed: " << strerror(errno) << std::endl;
-                break;
-            }
+            //v1改版：sendall
+            if(!send_all(sock_fd,line))break;
         }
 
         if (fds[1].revents & POLLIN) {
@@ -102,6 +118,7 @@ int main(int argc, char* argv[]) {
             if (n > 0) {
                 buffer[n] = '\0';
                 std::cout << buffer;
+                std::cout.flush();
             } else if (n == 0) {
                 std::cout << "server closed connection" << std::endl;
                 break;

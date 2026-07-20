@@ -29,14 +29,6 @@ int set_non_blocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void close_client(int epoll_fd, int client_fd) {
-    std::cout << "client disconnected, fd = " << client_fd << std::endl;
-
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
-    close(client_fd);
-    clients.erase(client_fd);
-}
-
 void update_epoll_events(int epoll_fd, int client_fd) {
     epoll_event event{};
     event.data.fd = client_fd;
@@ -48,7 +40,8 @@ void update_epoll_events(int epoll_fd, int client_fd) {
     }
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &event) == -1) {
-        std::cerr << "epoll_ctl mod failed: " << strerror(errno) << std::endl;
+        std::cerr << "epoll_ctl mod failed, fd = " << client_fd
+                  << ", error = " << strerror(errno) << std::endl;
     }
 }
 
@@ -60,6 +53,36 @@ void queue_message(int epoll_fd, int client_fd, const std::string& message) {
 
     it->second.out_buffer += message;
     update_epoll_events(epoll_fd, client_fd);
+}
+
+void broadcast_message(
+    int epoll_fd,
+    int sender_fd,
+    const std::string& message,
+    bool include_sender
+) {
+    for (auto& pair : clients) {
+        int client_fd = pair.first;
+
+        if (!include_sender && client_fd == sender_fd) {
+            continue;
+        }
+
+        queue_message(epoll_fd, client_fd, message);
+    }
+}
+
+void close_client(int epoll_fd, int client_fd) {
+    std::cout << "client disconnected, fd = " << client_fd << std::endl;
+
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
+    close(client_fd);
+    clients.erase(client_fd);
+
+    std::string leave_message =
+        "[system] client " + std::to_string(client_fd) + " left the chat.\n";
+
+    broadcast_message(epoll_fd, client_fd, leave_message, false);
 }
 
 void handle_client_read(int epoll_fd, int client_fd) {
@@ -83,8 +106,12 @@ void handle_client_read(int epoll_fd, int client_fd) {
 
                 std::cout << "recv from fd " << client_fd << ": " << line;
 
-                std::string reply = "[server echo] " + line;
-                queue_message(epoll_fd, client_fd, reply);
+                std::string chat_message =
+                    "[client " + std::to_string(client_fd) + "] " + line;
+
+                broadcast_message(epoll_fd, client_fd, chat_message, false);
+
+                queue_message(epoll_fd, client_fd, "[you] " + line);
             }
         } else if (n == 0) {
             close_client(epoll_fd, client_fd);
@@ -94,7 +121,9 @@ void handle_client_read(int epoll_fd, int client_fd) {
                 break;
             }
 
-            std::cerr << "recv failed: " << strerror(errno) << std::endl;
+            std::cerr << "recv failed, fd = " << client_fd
+                      << ", error = " << strerror(errno) << std::endl;
+
             close_client(epoll_fd, client_fd);
             return;
         }
@@ -110,16 +139,18 @@ void handle_client_write(int epoll_fd, int client_fd) {
     std::string& out = it->second.out_buffer;
 
     while (!out.empty()) {
-        ssize_t n = send(client_fd, out.data(), out.size(), 0);
+        ssize_t n = send(client_fd, out.data(), out.size(), MSG_NOSIGNAL);
 
         if (n > 0) {
-            out.erase(0, n);
+            out.erase(0, static_cast<size_t>(n));
         } else if (n == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 break;
             }
 
-            std::cerr << "send failed: " << strerror(errno) << std::endl;
+            std::cerr << "send failed, fd = " << client_fd
+                      << ", error = " << strerror(errno) << std::endl;
+
             close_client(epoll_fd, client_fd);
             return;
         }
@@ -136,7 +167,11 @@ int create_listen_socket(int port) {
     }
 
     int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+        std::cerr << "setsockopt failed: " << strerror(errno) << std::endl;
+        close(listen_fd);
+        return -1;
+    }
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -156,7 +191,7 @@ int create_listen_socket(int port) {
     }
 
     if (set_non_blocking(listen_fd) == -1) {
-        std::cerr << "set_non_blocking failed" << std::endl;
+        std::cerr << "set_non_blocking failed: " << strerror(errno) << std::endl;
         close(listen_fd);
         return -1;
     }
@@ -185,7 +220,7 @@ void accept_new_clients(int epoll_fd, int listen_fd) {
         }
 
         if (set_non_blocking(client_fd) == -1) {
-            std::cerr << "set_non_blocking client failed" << std::endl;
+            std::cerr << "set_non_blocking client failed: " << strerror(errno) << std::endl;
             close(client_fd);
             continue;
         }
@@ -210,7 +245,15 @@ void accept_new_clients(int epoll_fd, int listen_fd) {
                   << ", port = " << ntohs(client_addr.sin_port)
                   << std::endl;
 
-        queue_message(epoll_fd, client_fd, "Welcome to chatroom_v0.\n");
+        std::string welcome =
+            "[system] welcome, you are client " + std::to_string(client_fd) + ".\n";
+
+        queue_message(epoll_fd, client_fd, welcome);
+
+        std::string join_message =
+            "[system] client " + std::to_string(client_fd) + " joined the chat.\n";
+
+        broadcast_message(epoll_fd, client_fd, join_message, false);
     }
 }
 
@@ -218,7 +261,12 @@ int main(int argc, char* argv[]) {
     int port = 9000;
 
     if (argc >= 2) {
-        port = std::stoi(argv[1]);
+        try {
+            port = std::stoi(argv[1]);
+        } catch (...) {
+            std::cerr << "invalid port" << std::endl;
+            return 1;
+        }
     }
 
     int listen_fd = create_listen_socket(port);
@@ -244,7 +292,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "chat_server started on port " << port << std::endl;
+    std::cout << "chat_server v1 started on port " << port << std::endl;
 
     epoll_event events[MAX_EVENTS];
 
@@ -278,7 +326,7 @@ int main(int argc, char* argv[]) {
                 handle_client_read(epoll_fd, fd);
             }
 
-            if (ev & EPOLLOUT) {
+            if (clients.find(fd) != clients.end() && (ev & EPOLLOUT)) {
                 handle_client_write(epoll_fd, fd);
             }
         }

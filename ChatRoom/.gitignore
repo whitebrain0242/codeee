@@ -1,20 +1,6 @@
-# CMake build system files
-CMakeCache.txt
-CMakeFiles/
-CMakeScripts/
-cmake_install.cmake
-CTestTestfile.cmake
-Makefile
-install_manifest.txt
-# Compiled Object files
+build/
+cmake-build-debug/
 *.o
-*.obj
-*.ko
-
-# Libraries and executables
-*.lib
-*.a
-*.la
-*.so
 *.exe
-*.dll
+server
+client

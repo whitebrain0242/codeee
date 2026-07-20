@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 ##定义项目的名字是chatroom_v0，会用于一些默认变量，比如说${PROJECT_NAME}，会在ide中显示项目名字
 #没有制定名字，默认是c或者c++这里只编译c++,所以没有问题
-project(chatroom_v0)
+project(chatroom_v1)
 #设置c++标注是c++17,如果版本更低，那么配置失败
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

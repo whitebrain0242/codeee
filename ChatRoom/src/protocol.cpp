@@ -42,7 +42,15 @@ std::vector<std::string>split_words(const std::string& text){
     return words;
 }
 
-
+//v4：新增功能：将一段文本拆成第一个单词和剩余内容部分
+/*实现：trim,分隔符*/
+bool split_first_token(const std::string& text,std::string& first,std::string& rest){
+    const std::string cleaned=trim(text);
+    const std::size_t separator=cleaned.find_first_of(" \t");
+    first=cleaned.substr(0,separator);
+    rest=trim(cleaned.substr(separator+1));
+    return true;
+}
 
 //parse_command
 //v2新增解析命令函数

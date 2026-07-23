@@ -16,6 +16,9 @@ namespace chat
     std::string trim(const std::string &text);
     std::string to_upper_ascii(std::string text);
     std::vector<std::string> split_words(const std::string &text);
+    //v4新增：
+    bool split_first_token(const std::string& text,std::string& first,std::string& rest);
     ParsedCommand parse_command(const std::string &line);
     bool parse_port(const char *text, int &port);
+    
 }

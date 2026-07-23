@@ -26,7 +26,6 @@ namespace chat
             int fd = -1;
             bool logged_in = false;
             std::string username; // 新增昵称
-            bool has_nickname = false;
             bool close_after_write = false; // 当用户要退出时-》先把输出缓冲区中的数据发完，然后再关闭连接---处理QUIT
             std::string in_buffer;
             std::string out_buffer;
@@ -70,10 +69,8 @@ namespace chat
 
         void update_epoll_events(int client_fd);
         void queue_message(int client_fd, const std::string &message);
-        void broadcast_to_logged_in(
-            int sender_fd,
-            const std::string &message,
-            bool include_sender);
+        void broadcast_to_logged_in(int sender_fd,const std::string &message,bool include_sender);
+        void send_private_message(int sender_fd,const std::string& targetuserame,const std::string& message);
 
         void send_help(int client_fd);
         void send_online_users(int client_fd);

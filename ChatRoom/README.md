@@ -1,6 +1,12 @@
 # CHATROOM
 
 ## 版本历史 (Changelog)
+-   **v4.0**: 增加对在线用户的私聊功能，并且禁止对自己发送私聊消息
+              1. 新增MSG命令
+              2. 新增split_first_token函数来处理MSG的命令和参数
+              3. 只支持已经登录在线用户私聊
+
+              
 -   **v3.0**: 在文本协议的基础上增加内存账号系统
               1. 删除临时昵称
               2. 增加账号表
@@ -111,6 +117,7 @@ REGISTER <username> <password>
 LOGIN <username> <password>
 LOGOUT
 SAY <message>
+MSG <username> <message>
 WHO
 QUIT
 ```

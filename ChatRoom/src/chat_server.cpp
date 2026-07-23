@@ -199,6 +199,45 @@ namespace chat
         }
     }
 
+    //v4:新增用户之间的私聊功能
+    /*实现：1.先检查发送者是否登陆，查找目标用户名，获取目标fd,发送消息*/
+    void ChatServer::send_private_message(int sender_fd,const std::string& targetusername,const std::string& message)
+    {
+        auto sender_it=clients_.find(sender_fd);
+        if(sender_it==clients_.end()||!sender_it->second.logged_in)return;
+
+        //获取发送者名字：检查是否和自己的一样
+        const std::string sender_username=sender_it->second.username;
+        if(sender_username==targetusername){
+            queue_message(sender_fd,"[error] you cannot send private message to youself.\n");
+            return;
+        }
+
+        const auto online_it=online_users_.find(targetusername);
+        if(online_it==online_users_.end()){
+            queue_message(sender_fd,"[error] user "+targetusername+" is not online.\n");
+            return;
+        }
+        const int target_fd=online_it->second;
+        const auto target_it=clients_.find(target_fd);
+        if(target_it==clients_.end()||!target_it->second.logged_in||target_it->second.username!=targetusername){
+            online_users_.erase(online_it);
+            queue_message(sender_fd,"[error] target session is unavailable.\n");
+            return;
+        }
+        
+        queue_message(target_fd,"[private from "+sender_username+"]"+message+"\n");
+        queue_message(sender_fd, "[private to "+targetusername+" ] "+message+"\n");
+
+        std::cout << "private message, from="
+              << sender_username
+              << ", to="
+              << targetusername
+              << ", content="
+              << message
+              << '\n';
+    }
+
     void ChatServer::send_help(int client_fd)
     {
         queue_message(
@@ -209,6 +248,7 @@ namespace chat
             "  LOGIN <username> <password>    log in\n"
             "  LOGOUT                         log out but keep TCP connected\n"
             "  SAY <message>                  send a public message\n"
+            "  MSG <username> <message> send an online private message\n"
             "  WHO                            list logged-in online users\n"
             "  QUIT                           leave the server\n");
     }
@@ -460,6 +500,34 @@ namespace chat
         return true;
     }
 
+    //v4新增函数：处理私聊功能
+    if(command.name=="MSG"){
+        const auto client=client_it->second;
+        if(!client.logged_in){
+            queue_message(client_fd,"[error] you must LOGIN before sending private messages.\n");
+            return true;
+        }
+        std::string target_username;
+        std::string private_text;
+
+        if(!split_first_token(command.raw_arguments,target_username,private_text)||private_text.empty()){
+            queue_message(client_fd,"[error] usage :MSG <username> <message>\n");
+            return true;
+        }
+        if(!is_valid_username(target_username)){
+            queue_message(client_fd,"[error] invalid target username.\n");
+            return true;
+        }
+        if(private_text.size()>kMaxChatMessage){
+            queue_message(client_fd,"[error] private message is too long; maximum is " +std::to_string(kMaxChatMessage) +" bytes.\n");
+            return true;
+        }
+
+
+        send_private_message(client_fd,target_username,private_text);
+        return true;
+        
+    }
     if(command.name=="WHO"){
         if(!command.arguments.empty()){
             queue_message(client_fd, "[error] usage: WHO\n");
@@ -478,7 +546,7 @@ namespace chat
             return true;
         }
         if(client_it->second.logged_in){
-            logout_client(client_fd,true,true);
+            logout_client(client_fd,false,true);
         }
         auto current_it=clients_.find(client_fd);
         if(current_it==clients_.end()){
@@ -676,7 +744,7 @@ void ChatServer::accept_new_clients()
 
         clients_.emplace(
             client_fd,
-            ClientSession{client_fd, false, "", false, false, "", ""}
+            ClientSession{client_fd, false, "", false, "", ""}
         );
 
         char ip[INET_ADDRSTRLEN] = {};

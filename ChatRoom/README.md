@@ -1,29 +1,52 @@
 # CHATROOM
+    CHATRROOM is a Linux c++17 learning project build with:
+
+- TCP
+- epoll
+- non-blocking server sockets
+- application-layer text commands
+- in-memory account state
+- online public chat
+- online private chat
+- friend requests and friend relationships
+
+
 
 ## 版本历史 (Changelog)
+-   **v5.0**:增加好友系统
+    1. 发送好友请求
+    2. 接受好友请求
+    3. 拒绝好友请求
+    4. 删除好友
+    5. 查看好友请求列表
+    6. 查看好友列表和其在线状态
+    7. 只允许好友间私聊
+
+
+
 -   **v4.0**: 增加对在线用户的私聊功能，并且禁止对自己发送私聊消息
-              1. 新增MSG命令
-              2. 新增split_first_token函数来处理MSG的命令和参数
-              3. 只支持已经登录在线用户私聊
+    1. 新增MSG命令
+    2. 新增split_first_token函数来处理MSG的命令和参数
+    3. 只支持已经登录在线用户私聊
 
               
 -   **v3.0**: 在文本协议的基础上增加内存账号系统
-              1. 删除临时昵称
-              2. 增加账号表
-              3. 增加在线账号索引
-              4. 增加注册，登陆，注销
-              5. 修改SAY WHO
-              6. 模块化代码
+    1. 删除临时昵称
+    2. 增加账号表
+    3. 增加在线账号索引
+    4. 增加注册，登陆，注销
+    5. 修改SAY WHO
+    6. 模块化代码
 
 
 -   **v2.0**: 在广播的基础上，增加了文本协议，支持一些简单的命令
-              1. 不再直接受到消息就发送，先调用parse_command拆分命令和参数后分发到不同业务
-              2. 增加会话状态显示昵称
-              3. 新增命令
-              4. 增加昵称检验
-              5. 增加延迟关闭，受到QUIT不立即关闭
-              6. 增加输入长度保护
-              7. 支持等待QUIT响应
+    1. 不再直接受到消息就发送，先调用parse_command拆分命令和参数后分发到不同业务
+    2. 增加会话状态显示昵称
+    3. 新增命令
+    4. 增加昵称检验
+    5. 增加延迟关闭，受到QUIT不立即关闭
+    6. 增加输入长度保护
+    7. 支持等待QUIT响应
 -   **v1.0**：升级为广播模式，支持多人群聊，对于成员加入或者推出都会广播，所有人说的话都会广播，添加README,添加gitignore。
 -   **v0.0**：基础回声服务器，用于测试连通性，仅支持自己给自己发送消息。
 
@@ -40,10 +63,10 @@
     ## 2. 好友管理
 
     - [ ] 实现好友的添加、删除、查询操作
-    - [ ] 实现显示好友在线状态
-    - [ ] 禁止不存在好友关系的用户间的私聊
+    - [x] 实现显示好友在线状态
+    - [x] 禁止不存在好友关系的用户间的私聊
     - [ ] 实现屏蔽好友消息
-    - [ ] 实现好友间聊天
+    - [x] 实现好友间聊天
 
     ## 3. 群管理
 
@@ -69,8 +92,8 @@
 
     ## 5. 其他核心要求
 
-    - [ ] 使用 C++/Java/Golang 编程语言（不使用 C 语言）
-    - [ ] 使用 I/O 多路复用（C++ 使用 Epoll 或 io_uring）
+    - [x] 使用 C++/Java/Golang 编程语言（不使用 C 语言）
+    - [x] 使用 I/O 多路复用（C++ 使用 Epoll 或 io_uring）
     - [ ] 使用数据库完成数据存储（MySQL/Redis/LevelDB）
     - [ ] 服务端数据库仅作为存储后端，仅允许服务端连接
     - [ ] 允许客户端使用本地数据库（如 SQLite）作为聊天记录存储
@@ -118,6 +141,12 @@ LOGIN <username> <password>
 LOGOUT
 SAY <message>
 MSG <username> <message>
+ADD_FRIEND <username>
+ACCEPT_FRIEND <username>
+REJECT_FRIEND <username>
+REMOVE_FRIEND <username>
+FRIENDS
+FRIEND_REQUESTS
 WHO
 QUIT
 ```

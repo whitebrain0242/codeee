@@ -139,7 +139,7 @@ int main(int argc, char *argv[])
                 break;
             }
 
-            const chat::ParsedCommand command=chat::parse_command(line);
+            const chat::Command command=chat::parse_command(line);
 
             if (command.name == "QUIT")
             {

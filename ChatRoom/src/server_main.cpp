@@ -4,8 +4,7 @@
 #include <iostream>
 
 namespace{
-    constexpr int kDefaultPort = 9000;
-
+    constexpr int kDefaultPort = 9000; 
 }
 int main(int argc, char *argv[])
 {

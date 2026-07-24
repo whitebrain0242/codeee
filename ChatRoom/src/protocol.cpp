@@ -56,7 +56,7 @@ bool split_first_token(const std::string& text,std::string& first,std::string& r
 //v2新增解析命令函数
 //实现：
 //目的：去掉首尾空格+提取第一个单词作为命令+把剩余内容作为参数
-ParsedCommand parse_command(const std::string& line){
+Command parse_command(const std::string& line){
     const std::string cleaned =trim(line);
     if(cleaned.empty())return {};
 
@@ -68,7 +68,7 @@ ParsedCommand parse_command(const std::string& line){
 }
 
 //parse_port://v2新增自定义端口函数
-bool parse_port(const char* text, int& port) {
+bool parse_port(const std::string& text, int& port) {
     try {
         const int value = std::stoi(text);
         if (value < 1 || value > 65535) {

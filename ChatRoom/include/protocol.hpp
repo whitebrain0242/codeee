@@ -6,7 +6,7 @@
 namespace chat
 {
     // v3新增：
-    struct ParsedCommand
+    struct Command
     {
         std::string name;                   // 命令名字
         std::string raw_arguments;          // 原始参数字符串
@@ -18,7 +18,7 @@ namespace chat
     std::vector<std::string> split_words(const std::string &text);
     //v4新增：
     bool split_first_token(const std::string& text,std::string& first,std::string& rest);
-    ParsedCommand parse_command(const std::string &line);
-    bool parse_port(const char *text, int &port);
+    Command parse_command(const std::string &line);
+    bool parse_port(const std::string& text, int &port);
     
 }

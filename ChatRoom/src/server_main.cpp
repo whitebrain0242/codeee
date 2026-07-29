@@ -3,12 +3,9 @@
 
 #include <iostream>
 
-namespace{
-    constexpr int kDefaultPort = 9000; 
-}
 int main(int argc, char *argv[])
 {
-    int port = kDefaultPort;
+    int port = 9000;
 
     if (argc >= 2 && !chat::parse_port(argv[1], port))
     {

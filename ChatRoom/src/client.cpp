@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
+#include <cstdint>
 #include <iostream>
 #include <poll.h>
 #include <string>
@@ -11,7 +12,6 @@
 
 namespace
 {
-    constexpr int kDefaultPort = 9000;
     constexpr std::size_t kBufferSize = 4096;
 
     int connect_to_server(const std::string &ip, int port)
@@ -80,7 +80,7 @@ namespace
 int main(int argc, char *argv[])
 {
     std::string ip = "127.0.0.1";
-    int port = kDefaultPort;
+    int port = 9000;
 
     if (argc >= 2)
     {
@@ -131,15 +131,17 @@ int main(int argc, char *argv[])
             std::string line;
             if (!std::getline(std::cin, line))
             {
-                line = "QUIT";
+                break;
             }
+            const chat::Command command=chat::parse_command(line);
+            line+="\n";
 
-            if (!send_all(sock_fd, line + "\n"))
+            if (!send_all(sock_fd, line))
             {
                 break;
             }
 
-            const chat::Command command=chat::parse_command(line);
+            
 
             if (command.name == "QUIT")
             {
@@ -154,7 +156,8 @@ int main(int argc, char *argv[])
 
             if (n > 0)
             {
-                std::cout.write(buffer, n);
+                buffer[n]='\0';
+                std::cout<<buffer;
                 std::cout.flush();
             }
             else if (n == 0)

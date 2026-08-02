@@ -1,4 +1,8 @@
 build/
+config/mysql.conf
+*.log
+__pycache__/
+*.pyc
 cmake-build-debug/
 *.o
 *.exe

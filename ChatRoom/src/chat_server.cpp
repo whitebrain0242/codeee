@@ -12,10 +12,11 @@
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
+
 namespace chat
 {
-
-    ChatServer::ChatServer(int port) : port_(port),message_store_(1000,500) {}; // 没看懂e
+    ChatServer::ChatServer(int port,IUserRepository& user_repository)
+        : port_(port),user_repository_(user_repository),message_store_(1000,500) {} // 没看懂e
     ChatServer::~ChatServer()
     {
         for (const auto& [client_fd, session] : clients_) {
@@ -34,7 +35,39 @@ namespace chat
      // v3新增函数：服务端启动前的检验
     bool ChatServer::initialize()
     {
-        return create_listen_socket()&&create_epoll()&&add_listen_socket_to_epoll();
+        return load_registered_users()&&
+        create_listen_socket()&&
+        create_epoll()&&
+        add_listen_socket_to_epoll();
+    }
+
+    //把数据库里面村的已经注册的用户名列表，同步到服务的内存缓存（哈希表中
+    bool ChatServer::load_registered_users(){
+        //准备数据容器，查询数据库，清除旧的缓存，逐条写入
+        std::vector<std::string> usernames;
+        std::string error;
+
+        if(!user_repository_.load_usernames(usernames,error)){
+            std::cerr
+            << "failed to load registered users: "
+            << error
+            << std::endl;
+        return false;
+        }
+        users_.clear();
+
+        for(const std::string& username:usernames){
+            users_.emplace(
+                username,UserAccount{username,{},{},{}}
+            );
+        }
+        std::cout
+        << "loaded "
+        << users_.size()
+        << " registered account(s) from user repository"
+        << std::endl;
+
+        return true;
     }
 
     int ChatServer::run(){
@@ -323,7 +356,7 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
     std::cout << "client disconnected, fd=" << client_fd<< std::endl;
 
      if (announce_offline&&!offline_username.empty()){
-        broadcast_to_logged_in("system "+offline_username+" is offline.\n");
+        broadcast_to_logged_in("[system] " + offline_username + " is offline.\n");
     }
     
 }
@@ -632,7 +665,33 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
             return;
         }
 
-        users_.emplace(username,UserAccount{username,password,{},{},{}});
+        std::string repository_error;
+        const CreateUserResult result=user_repository_.create_user(username,password,repository_error);
+
+        if(result==CreateUserResult::AlreadyExists){
+             queue_message(
+            client_fd,
+            "[error] username already exists.\n"
+            );
+        return;
+        }
+        if(result==CreateUserResult::Error){
+            std::cerr
+            << "REGISTER database error for "
+            << username
+            << ": "
+            << repository_error
+            << std::endl;
+
+            queue_message(
+            client_fd,
+            "[error] database operation failed; "
+            "try again later.\n"
+            );
+        return;
+        }
+
+        users_.emplace(username,UserAccount{username,{},{},{}});
         queue_message(
             client_fd,
             "[system] registration successful. "
@@ -661,12 +720,41 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
         const std::string& username = arguments[0];
         const std::string& password = arguments[1];
 
-        const auto account_it = users_.find(username);
+        std::string repository_error;
+        const VerifyUserResult verification=
+            user_repository_.verify_user(
+            username,password,repository_error
+        );
 
-        if(account_it==users_.end()||account_it->second.password!=password){
-            queue_message(client_fd, "[error] invalid username or password.\n");
+        if(verification==VerifyUserResult::InvalidCredentials){
+            queue_message(
+            client_fd,
+            "[error] invalid username or password.\n"
+            );
             return;
         }
+        if(verification==VerifyUserResult::Error){
+            std::cerr
+            << "LOGIN database error for "
+            << username
+            << ": "
+            << repository_error
+            << std::endl;
+
+           queue_message(
+            client_fd,
+            "[error] database operation failed; "
+            "try again later.\n"
+           );
+           return;
+        }
+    
+         auto account_it = users_.find(username);
+
+        if(account_it==users_.end()){
+            account_it=users_.emplace(username,UserAccount{username,{},{},{}}).first;
+        }
+
         if(online_users_.find(username)!=online_users_.end()){
             queue_message(client_fd,"[error] this account is already logged in.\n");
             return;
@@ -1094,7 +1182,7 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
         if(it->second.logged_in){
             return true;
         }
-        queue_message(client_fd,"[error]you must LOGIN before "+action+".\n");
+        queue_message(client_fd,"[error] you must LOGIN before "+action+".\n");
         return false;
     }
 

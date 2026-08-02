@@ -22,4 +22,5 @@ namespace chat
     bool parse_port(const std::string& text, int &port);
     //解析使用历史消息查询的时候的数字，如果没有传入数字---default_value，如果数字超过的maxnum,返回false
     bool parse_count(const std::string& text, std::size_t default_value, std::size_t maximum, std::size_t& count);
+    
 }

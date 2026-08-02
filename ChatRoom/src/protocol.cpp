@@ -1,9 +1,11 @@
 #include "protocol.hpp"
-#include <charconv>   // for std::from_chars
-#include <limits>     // for std::numeric_limits
-#include <system_error> // for std::errc（可选，但某些编译器需要）
+
+#include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <limits>
 #include <sstream>
+#include <system_error>
 
 namespace chat{
     //trim:
@@ -11,10 +13,10 @@ namespace chat{
 //实现：
 //目的：用于删除字符串开头和结尾的空格/tab/\r------不同系统的换行格式不同需要处理
 std::string trim(const std::string& text){
-const auto begin=text.find_first_not_of("  \t\n\r\f\v");
+const auto begin=text.find_first_not_of(" \t\n\r\f\v");
     if(begin==std::string::npos)return "";
 
-    const auto end=text.find_last_not_of("  \t\n\r\f\v");
+    const auto end=text.find_last_not_of(" \t\n\r\f\v");
     return text.substr(begin,end-begin+1);
 }
 
@@ -24,9 +26,15 @@ const auto begin=text.find_first_not_of("  \t\n\r\f\v");
 //实现：使用toupper.。。
 //目的：实现转大写操作
 std::string to_upper_ascii(std::string text){
-    for(char& c:text){
-        c=static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    }
+    std::transform(
+        text.begin(),
+        text.end(),
+        text.begin(),
+        [](unsigned char ch) {
+            return static_cast<char>(std::toupper(ch));
+        }
+    );
+
     return text;
 }
 

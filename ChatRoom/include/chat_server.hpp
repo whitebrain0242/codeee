@@ -2,6 +2,8 @@
 
 #include "message_store.hpp"
 #include "protocol.hpp"
+#include "user_repository.hpp"
+
 #include <cstddef>
 #include <string>
 #include <unordered_map>
@@ -26,7 +28,6 @@ namespace chat
     struct UserAccount
     {
         std::string username;
-        std::string password;
 
         //v5新增好友功能
         std::unordered_set<std::string>friends;//好友列表
@@ -37,7 +38,7 @@ namespace chat
     class ChatServer
     {
     public:
-        explicit ChatServer(int port);
+        explicit ChatServer(int port,IUserRepository& user_repository);
         ~ChatServer();
 
         ChatServer(const ChatServer &) = delete;
@@ -55,6 +56,7 @@ namespace chat
         static constexpr std::size_t kMaxHistoryQueryCount = 100;
 
         int port_;
+        IUserRepository& user_repository_;//用户仓库
         int listen_fd_ = -1;
         int epoll_fd_ = -1;
 
@@ -66,14 +68,14 @@ namespace chat
         //存最近的消息
         InMemoryMessageStore message_store_;
 
+        //初始化
+        bool load_registered_users();
         
         bool create_listen_socket();
         bool create_epoll();
         bool add_listen_socket_to_epoll();
 
         static bool set_non_blocking(int fd);//把fd设置成非阻塞模式
-        
-
         
         void accept_new_clients();
         void close_client(int client_fd,bool announce_offline = true);
@@ -87,7 +89,7 @@ namespace chat
         bool handle_command(int client_fd, const std::string &line);
 
         void send_help(int client_fd);
-        void handle_register(int clinet_fd,const Command& command);
+        void handle_register(int client_fd,const Command& command);
         void handle_login(int client_fd,const Command& command);
         void handle_logout(int client_fd);//等出但是保持tcp连接
         void handle_public_message(int client_fd,const Command& command);//广播消息

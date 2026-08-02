@@ -13,6 +13,12 @@
 
 
 ## 版本历史 (Changelog)
+-   **v7.1**:MYSQL账号持久化
+    1. 注册帐号
+    2. 登录密码验证
+    3. 密码哈希+随即盐
+
+
 -   **v6.0**:增加查询历史消息
     1. 内存中的公共聊天历史记录
     2. 内存中的私聊历史记录
@@ -68,7 +74,7 @@
     ## 1. 账号管理
 
     - [x] 实现登录、注册、注销
-    - [ ] 实现数据加密
+    - [x] 实现数据加密
     - [ ] 实现通过验证码登录/注册/密码找回（邮件/手机号等）【提高】
 
     ## 2. 好友管理
@@ -112,7 +118,7 @@
     - [ ] 撰写用户文档
     - [ ] 支持大量客户端同时访问
     - [ ] 实现服务器日志，记录服务器的状态信息
-    - [ ] C/S 双端均支持在 CLI/Web 自行指定 IP:Port
+    - [x] C/S 双端均支持在 CLI/Web 自行指定 IP:Port
     - [ ] 实现具有高稳定性的客户端和服务器，防止在用户非法输入时崩溃或异常
     - [ ] 实现 TCP 心跳检测
     - [ ] 界面美观
@@ -167,39 +173,88 @@ QUIT
 昵称只能包含字母、数字和下划线，长度为 1-20 个字符。发送聊天消息前必须先设置昵称。
 
 
-### 1. 编译（cMake+make）
+## 依赖安装
 
-bash
+Ubuntu、Debian 或 WSL2 可参考：
 
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential \
+  cmake \
+  pkg-config \
+  libmariadb-dev \
+  libssl-dev \
+  mysql-server
 ```
+
+CMake 会优先寻找 `mysqlclient`，找不到时再寻找兼容的 `mariadb` 客户端库。
+
+## 第一步：执行 MySQL 脚本
+
+
+先登录 MySQL：
+
+```bash
+sudo mysql -u root -p
+```
+
+再执行：
+
+```sql
+SOURCE /绝对路径/chatroom_v7_1/MYSQL_RUN_THIS.sql;
+```
+
+## 第二步：创建程序配置
+
+```bash
+cp config/mysql.conf.example config/mysql.conf
+chmod 600 config/mysql.conf
+```
+
+编辑：
+
+```text
+config/mysql.conf
+```
+
+确保密码与 SQL 文件中的密码一致：
+
+```ini
+host=127.0.0.1
+port=3306
+user=chatroom
+password=你的数据库密码
+database=chatroom
+connect_timeout_seconds=5
+```
+
+真实配置文件已被 `.gitignore` 排除，不要提交数据库密码。
+
+## 第三步：编译
+
+```bash
 cmake -S . -B build
 cmake --build build
 ```
 
+## 第四步：启动
 
+服务端：
 
-### 2. 运行服务端（默认端口 9000）
-
-bash
-
-```
-./build/chat_server 9000
+```bash
+./build/chat_server 9000 config/mysql.conf
 ```
 
+客户端：
 
-
-### 3. 运行客户端（另开终端）
-
-bash
-
-```
+```bash
 ./build/chat_client 127.0.0.1 9000
 ```
 
+正常启动时会看到类似：
 
-
-
-
-
-
-
+```text
+loaded 0 registered account(s) from MySQL
+chat_server v7.1 started on port 9000
+```

@@ -13,6 +13,13 @@
 
 
 ## 版本历史 (Changelog)
+-   **v7.2**：好友数据持久化
+    1. 待处理好友请求
+    2. 正式好友关系
+    3. 好友操作事件
+    4. 加入protobuf
+
+
 -   **v7.1**:MYSQL账号持久化
     1. 注册帐号
     2. 登录密码验证
@@ -165,6 +172,7 @@ REJECT_FRIEND <username>
 REMOVE_FRIEND <username>
 FRIENDS
 FRIEND_REQUESTS
+FRIEND_EVENTS [count]
 HISTORY_PUBLIC [count]
 HISTORY_PRIVATE <username> [count]
 QUIT
@@ -190,6 +198,57 @@ sudo apt install -y \
 
 CMake 会优先寻找 `mysqlclient`，找不到时再寻找兼容的 `mariadb` 客户端库。
 
+## Protobuf 的两种构建方式
+
+### 安装了官方 Protobuf
+
+安装：
+
+```bash
+sudo apt install -y \
+  protobuf-compiler \
+  libprotobuf-dev
+```
+
+CMake 检测到 `protoc` 和 Protobuf C++ 库后，会自动生成：
+
+```text
+friend_event.pb.h
+friend_event.pb.cc
+```
+
+并使用：
+
+```text
+src/friend_event_codec_official.cpp
+```
+
+### 没有安装官方开发包
+
+项目会自动使用：
+
+```text
+src/friend_event_codec.cpp
+```
+
+它是针对当前 schema 的轻量 proto3-compatible 编解码器，读写的 wire fields 与 `friend_event.proto` 一致。
+
+项目测试验证了固定二进制结果：
+
+```text
+08011205616c6963651a03626f62207b
+```
+
+这对应：
+
+```text
+type = FRIEND_REQUEST_SENT
+actor_username = alice
+target_username = bob
+occurred_at_unix_ms = 123
+```
+
+
 ## 第一步：执行 MySQL 脚本
 
 
@@ -202,7 +261,18 @@ sudo mysql -u root -p
 再执行：
 
 ```sql
-SOURCE /绝对路径/chatroom_v7_1/MYSQL_RUN_THIS.sql;
+sudo mysql -p < MYSQL_RUN_THIS_V7_2.sql
+```
+它会创建：
+
+```text
+chatroom 数据库
+chatroom 数据库账号
+users 表
+friend_requests 表
+friendships 表
+friend_events 表
+外键、索引和程序所需权限
 ```
 
 ## 第二步：创建程序配置
@@ -210,23 +280,6 @@ SOURCE /绝对路径/chatroom_v7_1/MYSQL_RUN_THIS.sql;
 ```bash
 cp config/mysql.conf.example config/mysql.conf
 chmod 600 config/mysql.conf
-```
-
-编辑：
-
-```text
-config/mysql.conf
-```
-
-确保密码与 SQL 文件中的密码一致：
-
-```ini
-host=127.0.0.1
-port=3306
-user=chatroom
-password=你的数据库密码
-database=chatroom
-connect_timeout_seconds=5
 ```
 
 真实配置文件已被 `.gitignore` 排除，不要提交数据库密码。
@@ -257,4 +310,22 @@ cmake --build build
 ```text
 loaded 0 registered account(s) from MySQL
 chat_server v7.1 started on port 9000
+```
+
+##测试脚本
+```bash
+python3 tests/test_mysql_friend_persistence.py \
+  --server ./build/chat_server \
+  --config config/mysql.conf \
+  --port 19322
+```
+
+它会自动验证：
+
+```text
+账号重启持久化
+好友申请持久化
+好友关系持久化
+Protobuf 事件持久化
+删除好友后的持久化
 ```

@@ -1,4 +1,5 @@
 #include "chat_server.hpp"
+#include "in_memory_friend_repository.hpp"
 #include "in_memory_user_repository.hpp"
 #include "protocol.hpp"
 
@@ -9,20 +10,36 @@ int main(int argc, char* argv[]) {
 
     if (argc >= 2) {
         if (!chat::parse_port(argv[1], port)) {
-            std::cerr << "invalid test port" << std::endl;
+            std::cerr
+                << "invalid test port"
+                << std::endl;
             return 1;
         }
     }
 
-    chat::test::InMemoryUserRepository repository;
+    chat::test::InMemoryUserRepository
+        user_repository;
+
+    chat::test::InMemoryFriendRepository
+        friend_repository;
+
     std::string error;
 
-    if (!repository.initialize(error)) {
+    if (!user_repository.initialize(error)) {
         std::cerr << error << std::endl;
         return 1;
     }
 
-    chat::ChatServer server(port, repository);
+    if (!friend_repository.initialize(error)) {
+        std::cerr << error << std::endl;
+        return 1;
+    }
+
+    chat::ChatServer server(
+        port,
+        user_repository,
+        friend_repository
+    );
 
     if (!server.initialize()) {
         return 1;

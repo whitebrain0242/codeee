@@ -8,7 +8,8 @@
 
 namespace chat
 {
-    //没有看懂这个函数的作用
+//为两个用户生成顺序无关的对话标识符，conversationkey,这样子不管是谁，都可以通过一个键找到同一个会话消息
+//conversation_key("Alice", "Bob") 和 conversation_key("Bob", "Alice") 都会返回 "Alice\x1fBob"
 InMemoryMessageStore::InMemoryMessageStore(
     std::size_t max_public_messages,
     std::size_t max_private_messages_per_conversation

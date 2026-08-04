@@ -7,6 +7,7 @@
 #include <limits>
 
 namespace chat{
+    
 //创建密码记录，生成盐，将盐和迭代次数传给derive
 //实现：初始化，调用函数生成盐，传给drive
  bool PasswordHasher::create(

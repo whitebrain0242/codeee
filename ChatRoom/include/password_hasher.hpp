@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-
+//密码哈希
 namespace chat{
 //密码记录：存储盐，哈希值，迭代次数
 struct PasswordRecord{

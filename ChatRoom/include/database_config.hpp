@@ -1,6 +1,6 @@
 #pragma once
 #include <string>
-//使用mysql的前置声明
+//数据库配置结构
 namespace chat{
 //存储数据库的各种信息
 struct DatabaseConfig{

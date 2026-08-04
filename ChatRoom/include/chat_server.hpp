@@ -1,5 +1,7 @@
 #pragma once
 
+#include "friend_event_codec.hpp"
+#include "friend_repository.hpp"
 #include "message_store.hpp"
 #include "protocol.hpp"
 #include "user_repository.hpp"
@@ -38,7 +40,7 @@ namespace chat
     class ChatServer
     {
     public:
-        explicit ChatServer(int port,IUserRepository& user_repository);
+        explicit ChatServer(int port, IUserRepository& user_repository, IFriendRepository& friend_repository);
         ~ChatServer();
 
         ChatServer(const ChatServer &) = delete;
@@ -49,14 +51,17 @@ namespace chat
 
     private:
         static constexpr int kMaxEvents = 1024;
-        static constexpr std::size_t kReadBufferSize = 4096;
-        static constexpr std::size_t kMaxInputBuffer = 8192;
-        static constexpr std::size_t kMaxChatMessage = 1000;
-        static constexpr std::size_t kDefaultHistoryCount = 20;
-        static constexpr std::size_t kMaxHistoryQueryCount = 100;
+    static constexpr std::size_t kReadBufferSize = 4096;
+    static constexpr std::size_t kMaxInputBuffer = 8192;
+    static constexpr std::size_t kMaxChatMessage = 1000;
+    static constexpr std::size_t kDefaultHistoryCount = 20;
+    static constexpr std::size_t kMaxHistoryQueryCount = 100;
+    static constexpr std::size_t kDefaultFriendEventCount = 20;
+    static constexpr std::size_t kMaxFriendEventCount = 100;
 
         int port_;
         IUserRepository& user_repository_;//用户仓库
+        IFriendRepository& friend_repository_;//保存所有对好友数据操作的函数
         int listen_fd_ = -1;
         int epoll_fd_ = -1;
 
@@ -70,7 +75,7 @@ namespace chat
 
         //初始化
         bool load_registered_users();
-        
+        bool load_friend_state();
         bool create_listen_socket();
         bool create_epoll();
         bool add_listen_socket_to_epoll();
@@ -104,6 +109,8 @@ namespace chat
         void send_friend_list(int client_fd);//发好友列表
         void send_friend_requests(int client_fd);//发送待处理的好友申请列表
 
+        void handle_friend_events(int client_fd,const Command& command);
+
         void handle_public_history(int client_fd,const Command& command);
         void handle_private_history(int client_fd,const Command&command);
 
@@ -125,7 +132,23 @@ namespace chat
        static std::string format_public_history_line(const ChatMessage& message);
 
        static std::string format_private_history_line(const ChatMessage& message);
-        
+        // 序列化
+       static bool serialize_friend_event(
+        FriendEventType type,
+        const std::string& actor_username,
+        const std::string& target_username,
+        std::string& payload,
+        std::string& error
+       );
+
+       static std::string format_friend_event(
+        std::uint64_t database_id,
+        const FriendEvent& event
+       );
+
+       static std::string format_unix_ms(
+        std::int64_t unix_ms
+       );
     };
 
 }

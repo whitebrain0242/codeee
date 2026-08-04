@@ -1,10 +1,12 @@
 #include "chat_server.hpp"
 #include "database_config.hpp"
+#include "mysql_friend_repository.hpp"
 #include "mysql_user_repository.hpp"
 #include "protocol.hpp"
 
 #include <iostream>
 #include <string>
+
 //主入口函数：
 /*1. 解析配置
   2. 初始化依赖
@@ -55,7 +57,10 @@ int main(int argc, char *argv[])
       2. 调用initialize初始化
       3. run,进入主事件循环，接受处理连接
     */
-   chat::MysqlUserRepository user_repository(database_config);
+   
+
+    chat::MysqlUserRepository user_repository(database_config);
+    chat::MySqlFriendRepository friend_repository(database_config);
    if(!user_repository.initialize(error)){
     std::cerr
             << "MySQL initialization failed: "
@@ -64,7 +69,7 @@ int main(int argc, char *argv[])
         return 1;
    }
 
-   chat::ChatServer server(port,user_repository);
+   chat::ChatServer server(port,user_repository,friend_repository);
    if(!server.initialize())return 1;
    return server.run();
 

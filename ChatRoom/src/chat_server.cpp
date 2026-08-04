@@ -3,8 +3,11 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cctype>
+#include <chrono>
+#include <ctime>
 #include <cstring>
 #include <fcntl.h>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <sys/epoll.h>
@@ -15,8 +18,15 @@
 
 namespace chat
 {
-    ChatServer::ChatServer(int port,IUserRepository& user_repository)
-        : port_(port),user_repository_(user_repository),message_store_(1000,500) {} // 没看懂e
+    ChatServer::ChatServer(
+        int port,
+        IUserRepository& user_repository,
+        IFriendRepository& friend_repository
+    )
+        : port_(port),
+        user_repository_(user_repository),
+        friend_repository_(friend_repository),
+        message_store_(1000,500) {} // 没看懂e
     ChatServer::~ChatServer()
     {
         for (const auto& [client_fd, session] : clients_) {
@@ -35,7 +45,9 @@ namespace chat
      // v3新增函数：服务端启动前的检验
     bool ChatServer::initialize()
     {
-        return load_registered_users()&&
+        return 
+        load_registered_users()&&
+        load_friend_state()&&
         create_listen_socket()&&
         create_epoll()&&
         add_listen_socket_to_epoll();
@@ -69,8 +81,118 @@ namespace chat
 
         return true;
     }
+//在服务器启动时，从 MySqlFriendRepository 加载所有好友关系和待处理请求
+//并将它们填入 ChatServer 的内存数据结构（users_ 映射表）中
+bool ChatServer::load_friend_state() {
+    FriendState state;
+    std::string error;
 
-    int ChatServer::run(){
+    if (
+        !friend_repository_.load_state(
+            state,
+            error
+        )
+    ) {
+        std::cerr
+            << "failed to load friend state: "
+            << error
+            << std::endl;
+        return false;
+    }
+//把数据填充进好友列表中
+    for (const auto& friendship :
+         state.friendships) {
+        const std::string& left =
+            friendship.first;
+        const std::string& right =
+            friendship.second;
+
+        auto left_it = users_.find(left);//根据用户名字查找
+        auto right_it = users_.find(right);
+
+        if (
+            left_it == users_.end() ||
+            right_it == users_.end() ||
+            left == right
+        ) {
+            std::cerr
+                << "invalid friendship loaded "
+                << "from repository: "
+                << left
+                << " <-> "
+                << right
+                << std::endl;
+            return false;
+        }
+
+        left_it->second.friends.insert(right);
+        right_it->second.friends.insert(left);
+    }
+//把数据填充到申请表中
+    for (const auto& request :
+         state.pending_requests) {
+        const std::string& sender =
+            request.first;
+        const std::string& receiver =
+            request.second;
+
+        auto sender_it = users_.find(sender);
+        auto receiver_it = users_.find(receiver);
+
+        if (
+            sender_it == users_.end() ||
+            receiver_it == users_.end() ||
+            sender == receiver
+        ) {
+            std::cerr
+                << "invalid friend request "
+                << "loaded from repository: "
+                << sender
+                << " -> "
+                << receiver
+                << std::endl;
+            return false;
+        }
+
+        if (
+            sender_it->second.friends.find(
+                receiver
+            ) !=
+            sender_it->second.friends.end()
+        ) {
+            std::cerr
+                << "repository contains both "
+                << "friendship and pending request "
+                << "for "
+                << sender
+                << " and "
+                << receiver
+                << std::endl;
+            return false;
+        }
+
+        sender_it->second
+            .outgoing_friend_requests
+            .insert(receiver);
+
+        receiver_it->second
+            .incoming_friend_requests
+            .insert(sender);
+    }
+
+    std::cout
+        << "loaded "
+        << state.friendships.size()
+        << " friendship(s) and "
+        << state.pending_requests.size()
+        << " pending friend request(s) "
+        << "from MySQL"
+        << std::endl;
+
+    return true;
+}    
+
+int ChatServer::run() {
     if (listen_fd_ == -1 || epoll_fd_ == -1) {
         std::cerr
             << "server is not initialized"
@@ -79,7 +201,7 @@ namespace chat
     }
 
     std::cout
-        << "chat_server v6 started on port "
+        << "chat_server v7.2 started on port "
         << port_
         << std::endl;
 
@@ -147,89 +269,130 @@ namespace chat
     }
 }
 
+bool ChatServer::create_listen_socket() {
+    listen_fd_ =
+        socket(AF_INET, SOCK_STREAM, 0);
 
+    if (listen_fd_ == -1) {
+        std::cerr
+            << "socket failed: "
+            << std::strerror(errno)
+            << std::endl;
+        return false;
+    }
 
-    bool ChatServer::create_listen_socket()
-    {
-        listen_fd_= socket(AF_INET, SOCK_STREAM, 0);
-        if (listen_fd_ == -1)
-        {
-            std::cerr << "socket failed: " << strerror(errno) << std::endl;
-            return false;
-        }
+    int reuse_address = 1;
 
-        int opt = 1;
-        if (setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1)
-        {
-            std::cerr << "setsockopt failed: " << strerror(errno) << std::endl;
-            close(listen_fd_);
-            return false;
-        }
+    if (
+        setsockopt(
+            listen_fd_,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &reuse_address,
+            sizeof(reuse_address)
+        ) == -1
+    ) {
+        std::cerr
+            << "setsockopt failed: "
+            << std::strerror(errno)
+            << std::endl;
+        return false;
+    }
 
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port =  htons(static_cast<std::uint16_t>(port_));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port =
+        htons(static_cast<std::uint16_t>(port_));
 
-        if (bind(listen_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == -1)
-        {
-            std::cerr << "bind failed: " << strerror(errno) << std::endl;
-            return false;
-        }
+    if (
+        bind(
+            listen_fd_,
+            reinterpret_cast<sockaddr*>(&address),
+            sizeof(address)
+        ) == -1
+    ) {
+        std::cerr
+            << "bind failed: "
+            << std::strerror(errno)
+            << std::endl;
+        return false;
+    }
 
-        if (listen(listen_fd_, SOMAXCONN) == -1)
-        {
-            std::cerr << "listen failed: " << strerror(errno) << std::endl;
-            return false;
-        }
-        if(!set_non_blocking(listen_fd_)){
-            std::cerr
+    if (listen(listen_fd_, SOMAXCONN) == -1) {
+        std::cerr
+            << "listen failed: "
+            << std::strerror(errno)
+            << std::endl;
+        return false;
+    }
+
+    if (!set_non_blocking(listen_fd_)) {
+        std::cerr
             << "failed to set listen socket "
             << "non-blocking"
             << std::endl;
         return false;
-        }
-
-        return true;
     }
+
+    return true;
+}
+
 
 // v3新增：创建一个epoll,并且把监听socket加进去
-    bool ChatServer::create_epoll()
-    {
-        epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
-        if (epoll_fd_ == -1)
-        {
-            std::cerr << "epoll_create1 failed: " << std::strerror(errno) << '\n';
-            return false;
-        }
+bool ChatServer::create_epoll() {
+    epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
 
-        return true;
-    }
-    bool ChatServer::add_listen_socket_to_epoll(){
-        epoll_event event{};
-        event.data.fd = listen_fd_;
-        event.events = EPOLLIN;
-        if(epoll_ctl(epoll_fd_,EPOLL_CTL_ADD,listen_fd_,&event)==-1){
-            std::cerr<< "epoll_ctl add listen socket failed: "
-                     << std::strerror(errno)
-                     << std::endl;
-            return false;
-        }
-        return true;
+    if (epoll_fd_ == -1) {
+        std::cerr
+            << "epoll_create1 failed: "
+            << std::strerror(errno)
+            << std::endl;
+        return false;
     }
 
-    bool ChatServer::set_non_blocking(int fd)
-    {
-        const int flags = fcntl(fd, F_GETFL, 0);
-        if (flags == -1)
-        {
-            return false;
-        }
-        return fcntl(fd, F_SETFL, flags | O_NONBLOCK)!=-1;
+    return true;
+}
+    
+bool ChatServer::add_listen_socket_to_epoll() {
+    epoll_event event{};
+    event.data.fd = listen_fd_;
+    event.events = EPOLLIN;
+
+    if (
+        epoll_ctl(
+            epoll_fd_,
+            EPOLL_CTL_ADD,
+            listen_fd_,
+            &event
+        ) == -1
+    ) {
+        std::cerr
+            << "epoll_ctl add listen socket failed: "
+            << std::strerror(errno)
+            << std::endl;
+        return false;
     }
+
+    return true;
+}
+
+bool ChatServer::set_non_blocking(int fd) {
+    const int flags = fcntl(fd, F_GETFL, 0);
+
+    if (flags == -1) {
+        return false;
+    }
+
+    return
+        fcntl(
+            fd,
+            F_SETFL,
+            flags | O_NONBLOCK
+        ) != -1;
+}
 //实现：accept+报错处理+加入epoll+加入clients
-    void ChatServer::accept_new_clients()
-{
+void ChatServer::accept_new_clients() {
     while (true) {
         sockaddr_in client_address{};
         socklen_t client_length =
@@ -326,7 +489,7 @@ namespace chat
 
         queue_message(
             client_fd,
-            "[system] welcome to chatroom v6.\n"
+            "[system] welcome to chatroom v7.2.\n"
             "[system] type HELP to view commands.\n"
         );
     }
@@ -334,179 +497,280 @@ namespace chat
 
 //实现：1.先找到客户端存在与否2.把用户名字保存下来然后在在线人员表里面把他删除
 //3.epoll里面移除，关闭socket连接
-void ChatServer::close_client(int client_fd,bool announce_offline)
-{
+void ChatServer::close_client(
+    int client_fd,
+    bool announce_offline
+) {
     const auto it = clients_.find(client_fd);
+
     if (it == clients_.end()) {
         return;
     }
+
     std::string offline_username;
 
     if (it->second.logged_in) {
-        offline_username=it->second.username;
-        const auto online_it=online_users_.find(offline_username);
-        if(online_it!=online_users_.end()&&online_it->second==client_fd){
+        offline_username = it->second.username;
+
+        const auto online_it =
+            online_users_.find(offline_username);
+
+        if (
+            online_it != online_users_.end() &&
+            online_it->second == client_fd
+        ) {
             online_users_.erase(online_it);
         }
     }
-    epoll_ctl(epoll_fd_,EPOLL_CTL_DEL,client_fd,nullptr);
+
+    epoll_ctl(
+        epoll_fd_,
+        EPOLL_CTL_DEL,
+        client_fd,
+        nullptr
+    );
+
     close(client_fd);
     clients_.erase(it);
 
-    std::cout << "client disconnected, fd=" << client_fd<< std::endl;
+    std::cout
+        << "client disconnected, fd="
+        << client_fd
+        << std::endl;
 
-     if (announce_offline&&!offline_username.empty()){
-        broadcast_to_logged_in("[system] " + offline_username + " is offline.\n");
-    }
-    
-}
-
-
-    void ChatServer::update_epoll_events(int client_fd)
-    {
-        const auto it = clients_.find(client_fd);
-        if (it == clients_.end())
-        {
-            return;
-        }
-
-        epoll_event event{};
-        event.data.fd = client_fd;
-        event.events = EPOLLRDHUP;
-
-        if (!it->second.close_after_write)
-        {
-            event.events |= EPOLLIN;
-        }
-
-        if (!it->second.out_buffer.empty())
-        {
-            event.events |= EPOLLOUT;
-        }
-
-        if (epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, client_fd, &event) == -1)
-        {
-            std::cerr << "epoll_ctl MOD failed, fd=" << client_fd
-                      << ", error=" << std::strerror(errno) << '\n';
-        }
-    }
-
-    void ChatServer::handle_client_read(int client_fd)
-{
-    char buffer[kReadBufferSize];
-
-    while (true)
-    {
-        const ssize_t received =
-            recv(client_fd, buffer, sizeof(buffer), 0);
-
-        if (received > 0)
-        {
-            auto it = clients_.find(client_fd);
-            if (it == clients_.end())
-            {
-                return;
-            }
-            it->second.in_buffer.append(
-                buffer,
-                static_cast<std::size_t>(received));
-
-
-            while (true)
-            {
-                it=clients_.find(client_fd);
-                if(it==clients_.end()){
-                    return;
-                }
-
-                const std::size_t newline = it->second.in_buffer.find('\n');
-                if (newline == std::string::npos)
-                {
-                    break;
-                }
-
-                std::string line = it->second.in_buffer.substr(0, newline);
-               it->second.in_buffer.erase(0, newline + 1);
-                if(!handle_command(client_fd,line))return;
-
-                const auto state_it =clients_.find(client_fd);
-                if(state_it==clients_.end()||state_it->second.close_after_write)return;
-
-            }
-
-            it=clients_.find(client_fd);
-            if(it==clients_.end())return;
-
-            if(it->second.in_buffer.size()>kMaxInputBuffer){
-                queue_message(client_fd,"[error] input line is too long; connection will close.\n");
-                it->second.close_after_write=true;
-                update_epoll_events(client_fd);
-                return;
-            }
-            continue;
-        }
-        
-        if (received == 0)
-        {
-            close_client(client_fd);
-            return;
-        }
-        if (errno == EINTR) {
-                continue;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-        {
-                break;
-        }
-        
-        std::cerr << "recv failed, fd=" << client_fd
-                 << ", error=" << std::strerror(errno) << '\n';
-
-        close_client(client_fd);
-        return;        
+    if (
+        announce_offline &&
+        !offline_username.empty()
+    ) {
+        broadcast_to_logged_in(
+            "[system] " +
+            offline_username +
+            " is offline.\n"
+        );
     }
 }
 
-    void ChatServer::handle_client_write(int client_fd)
-{
 
-    auto client_it = clients_.find(client_fd);
-    if (client_it == clients_.end()) {
+void ChatServer::update_epoll_events(
+    int client_fd
+) {
+    const auto it = clients_.find(client_fd);
+
+    if (it == clients_.end()) {
         return;
     }
 
-    while (!client_it->second.out_buffer.empty())
-    {
-        const ssize_t sent = send(
+    epoll_event event{};
+    event.data.fd = client_fd;
+    event.events = EPOLLRDHUP;
+
+    if (!it->second.close_after_write) {
+        event.events |= EPOLLIN;
+    }
+
+    if (!it->second.out_buffer.empty()) {
+        event.events |= EPOLLOUT;
+    }
+
+    if (
+        epoll_ctl(
+            epoll_fd_,
+            EPOLL_CTL_MOD,
             client_fd,
-            client_it->second.out_buffer.data(),
-            client_it->second.out_buffer.size(),
-            MSG_NOSIGNAL);
+            &event
+        ) == -1
+    ) {
+        std::cerr
+            << "epoll_ctl modify failed, fd="
+            << client_fd
+            << ": "
+            << std::strerror(errno)
+            << std::endl;
+    }
+}
+
+void ChatServer::handle_client_read(
+    int client_fd
+) {
+    char buffer[kReadBufferSize];
+
+    while (true) {
+        const ssize_t received =
+            recv(
+                client_fd,
+                buffer,
+                sizeof(buffer),
+                0
+            );
+
+        if (received > 0) {
+            auto it = clients_.find(client_fd);
+
+            if (it == clients_.end()) {
+                return;
+            }
+
+            it->second.in_buffer.append(
+                buffer,
+                static_cast<std::size_t>(received)
+            );
+
+            while (true) {
+                it = clients_.find(client_fd);
+
+                if (it == clients_.end()) {
+                    return;
+                }
+
+                const std::size_t newline =
+                    it->second.in_buffer.find('\n');
+
+                if (newline == std::string::npos) {
+                    break;
+                }
+
+                std::string line =
+                    it->second.in_buffer.substr(
+                        0,
+                        newline
+                    );
+
+                it->second.in_buffer.erase(
+                    0,
+                    newline + 1
+                );
+
+                if (!handle_command(client_fd, line)) {
+                    return;
+                }
+
+                const auto state_it =
+                    clients_.find(client_fd);
+
+                if (
+                    state_it == clients_.end() ||
+                    state_it->second.close_after_write
+                ) {
+                    return;
+                }
+            }
+
+            it = clients_.find(client_fd);
+
+            if (it == clients_.end()) {
+                return;
+            }
+
+            if (
+                it->second.in_buffer.size() >
+                kMaxInputBuffer
+            ) {
+                queue_message(
+                    client_fd,
+                    "[error] input line is too long; "
+                    "connection will close.\n"
+                );
+
+                it->second.close_after_write = true;
+                update_epoll_events(client_fd);
+                return;
+            }
+
+            continue;
+        }
+
+        if (received == 0) {
+            close_client(client_fd);
+            return;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        if (
+            errno == EAGAIN ||
+            errno == EWOULDBLOCK
+        ) {
+            break;
+        }
+
+        std::cerr
+            << "recv failed, fd="
+            << client_fd
+            << ": "
+            << std::strerror(errno)
+            << std::endl;
+
+        close_client(client_fd);
+        return;
+    }
+}
+
+void ChatServer::handle_client_write(
+    int client_fd
+) {
+    auto it = clients_.find(client_fd);
+
+    if (it == clients_.end()) {
+        return;
+    }
+
+    while (!it->second.out_buffer.empty()) {
+        const ssize_t sent =
+            send(
+                client_fd,
+                it->second.out_buffer.data(),
+                it->second.out_buffer.size(),
+                MSG_NOSIGNAL
+            );
 
         if (sent > 0) {
-            client_it->second.out_buffer.erase(
+            it->second.out_buffer.erase(
                 0,
                 static_cast<std::size_t>(sent)
             );
             continue;
         }
 
-        if (sent == -1 && errno == EINTR) {
+        if (
+            sent == -1 &&
+            errno == EINTR
+        ) {
             continue;
         }
-        if (sent == -1 &&
-            (errno == EAGAIN || errno == EWOULDBLOCK)) {
+
+        if (
+            sent == -1 &&
+            (
+                errno == EAGAIN ||
+                errno == EWOULDBLOCK
+            )
+        ) {
             break;
         }
 
-        std::cerr << "send failed, fd=" << client_fd
-                  << ", error=" << std::strerror(errno) << '\n';
+        std::cerr
+            << "send failed, fd="
+            << client_fd
+            << ": "
+            << std::strerror(errno)
+            << std::endl;
+
         close_client(client_fd);
         return;
     }
 
-    if (client_it->second.out_buffer.empty() && client_it->second.close_after_write)
-    {
+    it = clients_.find(client_fd);
+
+    if (it == clients_.end()) {
+        return;
+    }
+
+    if (
+        it->second.out_buffer.empty() &&
+        it->second.close_after_write
+    ) {
         close_client(client_fd);
         return;
     }
@@ -515,39 +779,26 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
 }
 
 
-    void ChatServer::queue_message(int client_fd, const std::string& message)
-    {
-         const auto it = clients_.find(client_fd);
+void ChatServer::queue_message(
+    int client_fd,
+    const std::string& message
+) {
+    const auto it = clients_.find(client_fd);
 
-        if (it == clients_.end()) {
+    if (it == clients_.end()) {
         return;
-        }
-
-        it->second.out_buffer += message;
-         update_epoll_events(client_fd);
-    }
-    // v3：新增群发广播，把一条消息发给当前所有登陆用户
-    // 实现：筛选一登陆用户，是否回显，放入发送队列
-    void ChatServer::broadcast_to_logged_in(const std::string &message, int excluded_fd)
-    {
-        std::vector<int> recipients;
-        recipients.reserve(clients_.size());
-
-        for (const auto &[fd, session] : clients_)
-        {
-            if (session.logged_in&& fd != excluded_fd)
-               recipients.push_back(fd);
-        }
-        for(const int recipient_fd:recipients){
-            queue_message(recipient_fd,message);
-        }
     }
 
-
-    bool ChatServer::handle_command(int client_fd,const std::string &raw_line)
-{
+    it->second.out_buffer += message;
+    update_epoll_events(client_fd);
+}
     
-    const Command command = parse_command(raw_line);
+bool ChatServer::handle_command(
+    int client_fd,
+    const std::string& raw_line
+) {
+    const Command command =
+        parse_command(raw_line);
 
     if (command.name.empty()) {
         return true;
@@ -579,27 +830,35 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
         send_friend_list(client_fd);
     } else if (command.name == "FRIEND_REQUESTS") {
         send_friend_requests(client_fd);
+    } else if (command.name == "FRIEND_EVENTS") {
+        handle_friend_events(client_fd, command);
     } else if (command.name == "HISTORY_PUBLIC") {
         handle_public_history(client_fd, command);
     } else if (command.name == "HISTORY_PRIVATE") {
         handle_private_history(client_fd, command);
     } else if (command.name == "QUIT") {
         auto it = clients_.find(client_fd);
-        if(it!=clients_.end()){
-            it->second.close_after_write=true;
-            queue_message(client_fd,"[system] goobye.\n");
-        }   
-    }else{
-        queue_message(client_fd,"[error] unknown command.  Type HELP to view commands.\n");
+
+        if (it != clients_.end()) {
+            it->second.close_after_write = true;
+            queue_message(
+                client_fd,
+                "[system] goodbye.\n"
+            );
+        }
+    } else {
+        queue_message(
+            client_fd,
+            "[error] unknown command. "
+            "Type HELP to view commands.\n"
+        );
     }
-    
-    return clients_.find(client_fd)!=clients_.end();
-    
+
+    return clients_.find(client_fd) != clients_.end();
 }
 
-    void ChatServer::send_help(int client_fd)
-    {
-        queue_message(
+void ChatServer::send_help(int client_fd) {
+    queue_message(
         client_fd,
         "[system] commands:\n"
         "  HELP\n"
@@ -615,667 +874,1821 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
         "  REMOVE_FRIEND <username>\n"
         "  FRIENDS\n"
         "  FRIEND_REQUESTS\n"
+        "  FRIEND_EVENTS [count]\n"
         "  HISTORY_PUBLIC [count]\n"
         "  HISTORY_PRIVATE <username> [count]\n"
         "  QUIT\n"
     );
-    }
-
+}
     
     //v3新增注册函数
     //实现：1.先取客户端信息2.检查是否一登陆3.检查参数是不是2个4.检查名字和密码是否可以使用5.检查名字是否已经被使用
     //     最后增加名字和密码，发送信息
-    void ChatServer::handle_register(int client_fd,const Command& command){
-        auto client_it = clients_.find(client_fd);
+void ChatServer::handle_register(
+    int client_fd,
+    const Command& command
+) {
+    const auto client_it =
+        clients_.find(client_fd);
 
-        if (client_it == clients_.end()) {
-            return;
-        }
-        if(client_it->second.logged_in){
-            queue_message(client_fd,"[error] LOGOUT before registering another account.\n");
-            return;
-        }
-        const std::vector<std::string> arguments =split_words(command.raw_arguments);
+    if (client_it == clients_.end()) {
+        return;
+    }
 
-        if(arguments.size()!=2){
-            queue_message(client_fd,"[error] usage: REGISTER <username> <password>\n");
-            return;
-        }
+    if (client_it->second.logged_in) {
+        queue_message(
+            client_fd,
+            "[error] LOGOUT before registering "
+            "another account.\n"
+        );
+        return;
+    }
 
-        const std::string& username = arguments[0];
-        const std::string& password = arguments[1];
+    const auto arguments =
+        split_words(command.raw_arguments);
 
-        if(!is_valid_username(username)){
-            queue_message(
-                client_fd,
-                "[error] username must be 3-20 characters and contain "
-                "only letters, digits, or underscore.\n"
-            );
-            return;
-        }
-        if(!is_valid_password(password)){
-            queue_message(
-                client_fd,
-                "[error] password must be 4-64 non-space characters.\n"
-            );
-            return;
-        }
-        if(users_.find(username)!=users_.end()){
-            queue_message(client_fd,"[error] username already exists.\n");
-            return;
-        }
+    if (arguments.size() != 2) {
+        queue_message(
+            client_fd,
+            "[error] usage: REGISTER "
+            "<username> <password>\n"
+        );
+        return;
+    }
 
-        std::string repository_error;
-        const CreateUserResult result=user_repository_.create_user(username,password,repository_error);
+    const std::string& username = arguments[0];
+    const std::string& password = arguments[1];
 
-        if(result==CreateUserResult::AlreadyExists){
-             queue_message(
+    if (!is_valid_username(username)) {
+        queue_message(
+            client_fd,
+            "[error] username must be 3-20 "
+            "characters using letters, digits, "
+            "or underscores.\n"
+        );
+        return;
+    }
+
+    if (!is_valid_password(password)) {
+        queue_message(
+            client_fd,
+            "[error] password must be 4-64 "
+            "non-whitespace characters.\n"
+        );
+        return;
+    }
+
+    if (users_.find(username) != users_.end()) {
+        queue_message(
             client_fd,
             "[error] username already exists.\n"
-            );
+        );
         return;
-        }
-        if(result==CreateUserResult::Error){
-            std::cerr
+    }
+
+    std::string repository_error;
+
+    const CreateUserResult result =
+        user_repository_.create_user(
+            username,
+            password,
+            repository_error
+        );
+
+    if (
+        result ==
+        CreateUserResult::AlreadyExists
+    ) {
+        queue_message(
+            client_fd,
+            "[error] username already exists.\n"
+        );
+        return;
+    }
+
+    if (result == CreateUserResult::Error) {
+        std::cerr
             << "REGISTER database error for "
             << username
             << ": "
             << repository_error
             << std::endl;
 
-            queue_message(
+        queue_message(
             client_fd,
             "[error] database operation failed; "
             "try again later.\n"
-            );
-        return;
-        }
-
-        users_.emplace(username,UserAccount{username,{},{},{}});
-        queue_message(
-            client_fd,
-            "[system] registration successful. "
-            "Use LOGIN <username> <password> to log in.\n"
         );
+        return;
     }
+
+    users_.emplace(
+        username,
+        UserAccount{
+            username,
+            {},
+            {},
+            {}
+        }
+    );
+
+    queue_message(
+        client_fd,
+        "[system] registration successful.\n"
+        "[system] use LOGIN <username> <password> "
+        "to log in.\n"
+    );
+}
     //v3新增登陆函数
     //实现：1.取客户端2.检查是否登陆3.检查参数4.身份验证
-    void ChatServer::handle_login(int client_fd,const Command& command){
-        auto client_it = clients_.find(client_fd);
+void ChatServer::handle_login(
+    int client_fd,
+    const Command& command
+) {
+    auto client_it = clients_.find(client_fd);
 
-        if (client_it == clients_.end()) {
-            return;
-        }
-        if(client_it->second.logged_in){
-            queue_message(client_fd,"[error] this connection is already logged in.\n");
-            return;
-        }
-        const std::vector<std::string> arguments =split_words(command.raw_arguments);
+    if (client_it == clients_.end()) {
+        return;
+    }
 
-        if(arguments.size()!=2){
-            queue_message(client_fd,"[error] usage: LOGIN <username> <password>\n");
-            return;
-        }
+    if (client_it->second.logged_in) {
+        queue_message(
+            client_fd,
+            "[error] this connection is already "
+            "logged in.\n"
+        );
+        return;
+    }
 
-        const std::string& username = arguments[0];
-        const std::string& password = arguments[1];
+    const auto arguments =
+        split_words(command.raw_arguments);
 
-        std::string repository_error;
-        const VerifyUserResult verification=
-            user_repository_.verify_user(
-            username,password,repository_error
+    if (arguments.size() != 2) {
+        queue_message(
+            client_fd,
+            "[error] usage: LOGIN "
+            "<username> <password>\n"
+        );
+        return;
+    }
+
+    const std::string& username = arguments[0];
+    const std::string& password = arguments[1];
+
+    std::string repository_error;
+
+    const VerifyUserResult verification =
+        user_repository_.verify_user(
+            username,
+            password,
+            repository_error
         );
 
-        if(verification==VerifyUserResult::InvalidCredentials){
-            queue_message(
+    if (
+        verification ==
+        VerifyUserResult::InvalidCredentials
+    ) {
+        queue_message(
             client_fd,
             "[error] invalid username or password.\n"
-            );
-            return;
-        }
-        if(verification==VerifyUserResult::Error){
-            std::cerr
+        );
+        return;
+    }
+
+    if (verification == VerifyUserResult::Error) {
+        std::cerr
             << "LOGIN database error for "
             << username
             << ": "
             << repository_error
             << std::endl;
 
-           queue_message(
+        queue_message(
             client_fd,
             "[error] database operation failed; "
             "try again later.\n"
-           );
-           return;
-        }
-    
-         auto account_it = users_.find(username);
+        );
+        return;
+    }
 
-        if(account_it==users_.end()){
-            account_it=users_.emplace(username,UserAccount{username,{},{},{}}).first;
-        }
+    auto account_it = users_.find(username);
 
-        if(online_users_.find(username)!=online_users_.end()){
-            queue_message(client_fd,"[error] this account is already logged in.\n");
-            return;
-        }
-        client_it->second.logged_in=true;
-        client_it->second.username=username;
-        online_users_[username]=client_fd;
-        queue_message(client_fd,"[system] login successful. Welcome, " +username + ".\n");
-        //登陆之后，告诉有多少个好友请求
-        const std::size_t pending_count=account_it->second.incoming_friend_requests.size();
-        if(pending_count>0){
-            queue_message(client_fd,"[system] you have " +
+    if (account_it == users_.end()) {
+        account_it =
+            users_.emplace(
+                username,
+                UserAccount{
+                    username,
+                    {},
+                    {},
+                    {}
+                }
+            ).first;
+    }
+
+    if (
+        online_users_.find(username) !=
+        online_users_.end()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] this account is already "
+            "logged in.\n"
+        );
+        return;
+    }
+
+    client_it->second.logged_in = true;
+    client_it->second.username = username;
+    online_users_[username] = client_fd;
+
+    queue_message(
+        client_fd,
+        "[system] login successful. Welcome, " +
+        username +
+        ".\n"
+    );
+
+    const std::size_t pending_count =
+        account_it->second
+            .incoming_friend_requests
+            .size();
+
+    if (pending_count > 0) {
+        queue_message(
+            client_fd,
+            "[system] you have " +
             std::to_string(pending_count) +
             " pending friend request(s). "
-            "Use FRIEND_REQUESTS to view them.\n");
-        }
-        broadcast_to_logged_in("[system] "+username+" is online.\n",client_fd);
-    
+            "Use FRIEND_REQUESTS to view them.\n"
+        );
     }
 
+    broadcast_to_logged_in(
+        "[system] " +
+        username +
+        " is online.\n",
+        client_fd
+    );
+}
 
-    void ChatServer::handle_logout(int client_fd){
-        const auto client_it = clients_.find(client_fd);
 
-        if(client_it==clients_.end()){
-            queue_message(client_fd, "[error] you are not logged in.\n");
-            return;
-        }
-        const std::string username=client_it->second.username;
-        online_users_.erase(username);
-        client_it->second.logged_in=false;
-        client_it->second.username.clear();
-        queue_message(client_fd,"[system] logout successful.\n");
-        broadcast_to_logged_in("[system] "+username+" is offline.\n");
-        
+void ChatServer::handle_logout(int client_fd) {
+    auto client_it = clients_.find(client_fd);
+
+    if (client_it == clients_.end()) {
+        return;
     }
 
-    void ChatServer::handle_public_message(int client_fd,const Command& command){
-        if(!require_login(client_fd,"chatting"))return;
-
-        const std::string message=trim(command.raw_arguments);
-
-        if (message.empty()) {
-            queue_message(client_fd, "[error] usage: SAY <message>\n");
-            return ;
-        }
-
-        if (message.size() > kMaxChatMessage) {
-            queue_message(
-                client_fd,
-                "[error] message is too long; maximum is 1000 bytes.\n"
-            );
-            return ;
-        }
-        const std::string sender=clients_.at(client_fd).username;
-        // 直接调用，不赋值
-        message_store_.add_public(sender, message);
-
-        broadcast_to_logged_in( "[" +sender +"] " +message + "\n");
+    if (!client_it->second.logged_in) {
+        queue_message(
+            client_fd,
+            "[error] you are not logged in.\n"
+        );
+        return;
     }
 
-    void ChatServer::handle_private_message(int client_fd,const Command& command){
-        //验证登陆状态
-        if(!require_login(client_fd,"sending private message"))return;
+    const std::string username =
+        client_it->second.username;
 
-        //解析命令参数
-        std::string target_username;
-        std::string message;
-        if(!split_first_token(command.raw_arguments,target_username,message)||message.empty()){
-            queue_message(client_fd,"[error] usage :MSG <username> <message>\n");
-            return;
-        }
-        //验证目标用户名合法性
-        if(!is_valid_username(target_username)){
-            queue_message(client_fd,"[error] invalid target username.\n");
-            return;
-        }
-        //检查消息长度上限
-        if(message.size()>kMaxChatMessage){
-            queue_message(client_fd,"[error] private message is too long; maximum is 1000 bytes.\n");
-            return;
-        }
+    online_users_.erase(username);
+    client_it->second.logged_in = false;
+    client_it->second.username.clear();
 
-        send_private_message(client_fd,target_username,message);
+    queue_message(
+        client_fd,
+        "[system] logout successful.\n"
+    );
+
+    broadcast_to_logged_in(
+        "[system] " +
+        username +
+        " is offline.\n"
+    );
+}
+
+void ChatServer::handle_public_message(
+    int client_fd,
+    const Command& command
+) {
+    if (!require_login(client_fd, "chatting")) {
+        return;
     }
 
-    //v5新增添加好友
-    void ChatServer::handle_add_friend(int client_fd,const Command& command){
-        if(!require_login(client_fd,"adding friends")){
-            return;
-        }
+    const std::string message =
+        trim(command.raw_arguments);
 
-        std::string target_username;
-        if(!extract_single_username(client_fd,command,"ADD_FRIEND <username>",target_username)){
-            return;
-        }
-
-        const std::string current_username=clients_.at(client_fd).username;
-        if(target_username==current_username){
-            queue_message(client_fd,"[error] you cannot add yourself as a friend .\n");
-            return;
-        }
-
-        
-        auto target_it=users_.find(target_username);
-        if(target_it==users_.end()){
-            queue_message(client_fd,"[error] "+target_username+"does not exist .\n");
-            return;
-        }
-        auto& current_account=users_.at(current_username);
-        auto& target_account=target_it->second;
-
-        if(current_account.friends.find(target_username)!=current_account.friends.end()){
-            queue_message(client_fd,"[error] "+target_username+" is already your friend. \n");
-            return;
-        }
-        if(current_account.outgoing_friend_requests.find(target_username)!=current_account.outgoing_friend_requests.end()){
-            queue_message(client_fd,"[error] friend request already sent to " +target_username +".\n");
-            return;
-        }
-        if(current_account.incoming_friend_requests.find(target_username)!=current_account.incoming_friend_requests.end()){
-            queue_message(client_fd,"[error] " +target_username +" already sent you a request. ""Use ACCEPT_FRIEND " +target_username +".\n");
-            return;
-        }
-        current_account.outgoing_friend_requests.insert(target_username);
-        target_account.incoming_friend_requests.insert(current_username);
-        queue_message(client_fd,"[system] friend request sent to " +target_username +".\n");
-
-        notify_user_if_online(target_username,"[system] friend request from " +current_username +". Use ACCEPT_FRIEND " +current_username +" or REJECT_FRIEND " +current_username +".\n");
-    }
-    //v5新增接受好友申请：登陆，提取名字，我的名字，users里面找两人，找好友申请，移除，插入
-    void ChatServer::handle_accept_friend(int client_fd,const Command& command){
-        if(!require_login(client_fd,"accepting friend requests")){
-            return;
-        }
-
-        std::string requester_username;
-        if(!extract_single_username(client_fd,command,"ACCEPT_FRIEND <username>",requester_username)){
-            return;
-        }
-
-
-        const std::string current_username=clients_.at(client_fd).username;
-   
-        auto requester_it=users_.find(requester_username);
-        if(requester_it==users_.end()){
-            queue_message(client_fd,"[error] requester account no longer exists.\n");
-            return;
-        }
-        auto& current_account=users_.at(current_username);
-        auto& requester_account=requester_it->second;
-
-        if(current_account.incoming_friend_requests.find(requester_username)==current_account.incoming_friend_requests.end()){
-            queue_message(client_fd,"[error] no pending friend request from " +requester_username +".\n");
-            return;
-        }
-        current_account.incoming_friend_requests.erase(requester_username);
-        requester_account.outgoing_friend_requests.erase(current_username);
-
-        current_account.friends.insert(requester_username);
-        requester_account.friends.insert(current_username);
-
-        queue_message(client_fd,"[system] you and " +requester_username +" are now friends.\n");
-        notify_user_if_online(requester_username,"[system] " +current_username +" accepted your friend request.\n");
-
-    }
-    
-    //v5:拒绝好友请求
-    void ChatServer::handle_reject_friend(int client_fd,const Command& command){
-        if(!require_login(client_fd,"rejecting friend requests"))return;
-        std::string requester_username;
-        if(!extract_single_username(client_fd,command,"REJECT_FRIEND <username>",requester_username)){
-            return;
-        }
-        const std::string current_username=clients_.at(client_fd).username;
-        
-        auto requester_it=users_.find(requester_username);
-        if(requester_it==users_.end()){
-            queue_message(client_fd,"[error] requester account no longer exists.\n");
-            return;
-        }
-        UserAccount& current_account=users_.at(current_username);
-
-        if(current_account.incoming_friend_requests.find(requester_username)==current_account.incoming_friend_requests.end()){
-            queue_message(client_fd,"[error] no pending friend request from " +requester_username +".\n");
-            return;
-        }
-        current_account.incoming_friend_requests.erase(requester_username);
-        requester_it->second.outgoing_friend_requests.erase(current_username);
-
-        queue_message(client_fd,"[system] friend request from " +requester_username +" rejected.\n");
-        notify_user_if_online(requester_username,"[system] " +current_username +" rejected your friend request.\n");
-    }
-    //v5：新增删除好友:登陆，提取名字，我的名字，在users里面找
-    void ChatServer::handle_remove_friend(int client_fd,const Command& command){
-        if(!require_login(client_fd,"removing friends"))return;
-
-        std::string friend_username;
-        if(!extract_single_username(client_fd,command,"REMOVE_FRIEND <username>",friend_username)){
-            return;
-        }
-        const std::string current_username=clients_.at(client_fd).username;
-        auto friend_it=users_.find(friend_username);
-
-        if(friend_it == users_.end()){
-            queue_message(client_fd,"[error] user "+friend_username+" does not exist.\n");
-            return;
-        }
-         auto& current_account =users_.at(current_username);
-
-        if(current_account.friends.find(friend_username) ==current_account.friends.end()){
-            queue_message(client_fd,"[error] " +friend_username +" is not your friend.\n");
-            return;
-        }
-
-        current_account.friends.erase(friend_username);
-        friend_it->second.friends.erase(current_username);
-
-        queue_message(client_fd,"[system] removed " +friend_username +" from your friend list.\n");
-        notify_user_if_online(friend_username,"[system] " +current_username +" removed you from their friend list.\n");
-
+    if (message.empty()) {
+        queue_message(
+            client_fd,
+            "[error] usage: SAY <message>\n"
+        );
+        return;
     }
 
-    //v5:新增获取好友列表，并且标注是否在线
-    void ChatServer::send_friend_list(int client_fd){
-        if(!require_login(client_fd,"viewing friends"))return;
-        const std::string username=clients_.at(client_fd).username;
-        
-        std::vector<std::string> friends(users_.at(username).friends.begin(),users_.at(username).friends.end());
-
-        std::sort(friends.begin(),friends.end());
-        std::ostringstream output;
-        output<< "[system] friends ("<< friends.size()<< "):\n";
-        if(friends.empty()){
-            output << "  (none)\n";
-        }else{
-            for(const std::string& friend_name:friends){
-                const bool online =online_users_.find(friend_name)!=online_users_.end();
-                output<< "  "<< friend_name << " ["<< (online ? "online" : "offline") << "]\n";
-                
-            }
-        }
-        queue_message(client_fd,output.str());
+    if (message.size() > kMaxChatMessage) {
+        queue_message(
+            client_fd,
+            "[error] public message is too long; "
+            "maximum is 1000 bytes.\n"
+        );
+        return;
     }
-    //v5显示好友申请列表：发送和接受
-    void ChatServer::send_friend_requests(int client_fd){
-        if(!require_login(client_fd,"viewing friend requests"))return;
 
-        const std::string username=clients_.at(client_fd).username;
-        const auto& account=users_.at(username);
+    const std::string sender =
+        clients_.at(client_fd).username;
 
-        queue_message(client_fd,"[system] incoming requests (" +std::to_string(account.incoming_friend_requests.size()) +"): " +join_sorted(account.incoming_friend_requests ) +"\n""[system] outgoing requests (" +std::to_string(account.outgoing_friend_requests.size()) +"): " + join_sorted(account.outgoing_friend_requests) +"\n");
+    const ChatMessage stored =
+        message_store_.add_public(
+            sender,
+            message
+        );
+
+    (void)stored;
+
+    broadcast_to_logged_in(
+        "[" +
+        sender +
+        "] " +
+        message +
+        "\n"
+    );
+}
+
+void ChatServer::handle_private_message(
+    int client_fd,
+    const Command& command
+) {
+    if (
+        !require_login(
+            client_fd,
+            "sending private messages"
+        )
+    ) {
+        return;
     }
+
+    std::string target_username;
+    std::string private_text;
+
+    if (
+        !split_first_token(
+            command.raw_arguments,
+            target_username,
+            private_text
+        ) ||
+        private_text.empty()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] usage: MSG "
+            "<username> <message>\n"
+        );
+        return;
+    }
+
+    if (!is_valid_username(target_username)) {
+        queue_message(
+            client_fd,
+            "[error] invalid target username.\n"
+        );
+        return;
+    }
+
+    if (private_text.size() > kMaxChatMessage) {
+        queue_message(
+            client_fd,
+            "[error] private message is too long; "
+            "maximum is 1000 bytes.\n"
+        );
+        return;
+    }
+
+    send_private_message(
+        client_fd,
+        target_username,
+        private_text
+    );
+}
 
     //v6新增函数：处理who
-    void ChatServer::handle_who(int client_fd){
-       if(!require_login(client_fd,"using WHO")){
+void ChatServer::handle_who(int client_fd) {
+    if (
+        !require_login(
+            client_fd,
+            "using WHO"
+        )
+    ) {
         return;
-       }
+    }
 
-        std::vector<std::string> names;
-        names.reserve(online_users_.size());
+    std::vector<std::string> names;
+    names.reserve(online_users_.size());
 
-        for (const auto &[username, fd] : online_users_)
-        {
-            (void)fd;
-            names.push_back(username);
-        }
+    for (const auto& [username, fd] :
+         online_users_) {
+        (void)fd;
+        names.push_back(username);
+    }
 
-        std::sort(names.begin(), names.end());
+    std::sort(names.begin(), names.end());
 
-        std::ostringstream output;
-        output<<"[system] online users (" + std::to_string(names.size()) + "): ";
+    std::ostringstream output;
+    output
+        << "[system] online users ("
+        << names.size()
+        << "): ";
 
-        if(names.empty()){
-            output<<"(none)";
-        }else{
-         for (std::size_t i = 0; i < names.size(); ++i)
-         {
-            if (i != 0)
-            {
-                output<< ", ";
+    if (names.empty()) {
+        output << "(none)";
+    } else {
+        for (std::size_t index = 0;
+             index < names.size();
+             ++index) {
+            if (index > 0) {
+                output << ", ";
             }
-             output<< names[i];
-         }
-    }
-        output<< "\n";
 
-        queue_message(client_fd, output.str());
-
+            output << names[index];
+        }
     }
+
+    output << '\n';
+
+    queue_message(client_fd, output.str());
+}
+    //v5新增添加好友
+void ChatServer::handle_add_friend(
+    int client_fd,
+    const Command& command
+) {
+    if (
+        !require_login(
+            client_fd,
+            "adding friends"
+        )
+    ) {
+        return;
+    }
+
+    std::string target_username;
+
+    if (
+        !extract_single_username(
+            client_fd,
+            command,
+            "ADD_FRIEND <username>",
+            target_username
+        )
+    ) {
+        return;
+    }
+
+    const std::string current_username =
+        clients_.at(client_fd).username;
+
+    if (target_username == current_username) {
+        queue_message(
+            client_fd,
+            "[error] you cannot add yourself "
+            "as a friend.\n"
+        );
+        return;
+    }
+
+    auto target_it = users_.find(target_username);
+
+    if (target_it == users_.end()) {
+        queue_message(
+            client_fd,
+            "[error] user " +
+            target_username +
+            " does not exist.\n"
+        );
+        return;
+    }
+
+    auto& current_account =
+        users_.at(current_username);
+    auto& target_account =
+        target_it->second;
+
+    if (
+        current_account.friends.find(
+            target_username
+        ) != current_account.friends.end()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] " +
+            target_username +
+            " is already your friend.\n"
+        );
+        return;
+    }
+
+    if (
+        current_account
+            .outgoing_friend_requests
+            .find(target_username) !=
+        current_account
+            .outgoing_friend_requests
+            .end()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] friend request already sent "
+            "to " +
+            target_username +
+            ".\n"
+        );
+        return;
+    }
+
+    if (
+        current_account
+            .incoming_friend_requests
+            .find(target_username) !=
+        current_account
+            .incoming_friend_requests
+            .end()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] " +
+            target_username +
+            " already sent you a request. "
+            "Use ACCEPT_FRIEND " +
+            target_username +
+            ".\n"
+        );
+        return;
+    }
+
+    std::string protobuf_event;
+    std::string error;
+
+    if (
+        !serialize_friend_event(
+            FriendEventType::RequestSent,
+            current_username,
+            target_username,
+            protobuf_event,
+            error
+        )
+    ) {
+        std::cerr
+            << "failed to serialize friend "
+            << "request event: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] failed to serialize "
+            "friend event.\n"
+        );
+        return;
+    }
+
+    const FriendMutationResult result =
+        friend_repository_.create_request(
+            current_username,
+            target_username,
+            protobuf_event,
+            error
+        );
+
+    if (
+        result ==
+        FriendMutationResult::AlreadyExists
+    ) {
+        queue_message(
+            client_fd,
+            "[error] friend request already "
+            "exists in MySQL.\n"
+        );
+        return;
+    }
+
+    if (
+        result ==
+        FriendMutationResult::NotFound
+    ) {
+        queue_message(
+            client_fd,
+            "[error] one of the accounts no "
+            "longer exists.\n"
+        );
+        return;
+    }
+
+    if (result == FriendMutationResult::Error) {
+        std::cerr
+            << "ADD_FRIEND database error: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] database operation failed; "
+            "friend request was not created.\n"
+        );
+        return;
+    }
+
+    current_account
+        .outgoing_friend_requests
+        .insert(target_username);
+
+    target_account
+        .incoming_friend_requests
+        .insert(current_username);
+
+    queue_message(
+        client_fd,
+        "[system] friend request sent to " +
+        target_username +
+        ".\n"
+    );
+
+    notify_user_if_online(
+        target_username,
+        "[system] friend request from " +
+        current_username +
+        ". Use ACCEPT_FRIEND " +
+        current_username +
+        " or REJECT_FRIEND " +
+        current_username +
+        ".\n"
+    );
+}
+
+    //v5新增接受好友申请：登陆，提取名字，我的名字，users里面找两人，找好友申请，移除，插入
+void ChatServer::handle_accept_friend(
+    int client_fd,
+    const Command& command
+) {
+    if (
+        !require_login(
+            client_fd,
+            "accepting friend requests"
+        )
+    ) {
+        return;
+    }
+
+    std::string requester_username;
+
+    if (
+        !extract_single_username(
+            client_fd,
+            command,
+            "ACCEPT_FRIEND <username>",
+            requester_username
+        )
+    ) {
+        return;
+    }
+
+    const std::string current_username =
+        clients_.at(client_fd).username;
+
+    auto requester_it =
+        users_.find(requester_username);
+
+    if (requester_it == users_.end()) {
+        queue_message(
+            client_fd,
+            "[error] requester account no longer "
+            "exists.\n"
+        );
+        return;
+    }
+
+    auto& current_account =
+        users_.at(current_username);
+    auto& requester_account =
+        requester_it->second;
+
+    if (
+        current_account
+            .incoming_friend_requests
+            .find(requester_username) ==
+        current_account
+            .incoming_friend_requests
+            .end()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] no pending friend request "
+            "from " +
+            requester_username +
+            ".\n"
+        );
+        return;
+    }
+
+    std::string protobuf_event;
+    std::string error;
+
+    if (
+        !serialize_friend_event(
+            FriendEventType::RequestAccepted,
+            current_username,
+            requester_username,
+            protobuf_event,
+            error
+        )
+    ) {
+        std::cerr
+            << "failed to serialize friend "
+            << "accept event: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] failed to serialize "
+            "friend event.\n"
+        );
+        return;
+    }
+
+    const FriendMutationResult result =
+        friend_repository_.accept_request(
+            requester_username,
+            current_username,
+            protobuf_event,
+            error
+        );
+
+    if (
+        result ==
+        FriendMutationResult::NotFound
+    ) {
+        queue_message(
+            client_fd,
+            "[error] pending friend request "
+            "was not found in MySQL.\n"
+        );
+        return;
+    }
+
+    if (
+        result ==
+        FriendMutationResult::AlreadyExists
+    ) {
+        queue_message(
+            client_fd,
+            "[error] friendship already exists "
+            "in MySQL.\n"
+        );
+        return;
+    }
+
+    if (result == FriendMutationResult::Error) {
+        std::cerr
+            << "ACCEPT_FRIEND database error: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] database operation failed; "
+            "friend request was not accepted.\n"
+        );
+        return;
+    }
+
+    current_account
+        .incoming_friend_requests
+        .erase(requester_username);
+
+    requester_account
+        .outgoing_friend_requests
+        .erase(current_username);
+
+    current_account.friends.insert(
+        requester_username
+    );
+
+    requester_account.friends.insert(
+        current_username
+    );
+
+    queue_message(
+        client_fd,
+        "[system] you and " +
+        requester_username +
+        " are now friends.\n"
+    );
+
+    notify_user_if_online(
+        requester_username,
+        "[system] " +
+        current_username +
+        " accepted your friend request.\n"
+    );
+}
+    
+    //v5:拒绝好友请求
+void ChatServer::handle_reject_friend(
+    int client_fd,
+    const Command& command
+) {
+    if (
+        !require_login(
+            client_fd,
+            "rejecting friend requests"
+        )
+    ) {
+        return;
+    }
+
+    std::string requester_username;
+
+    if (
+        !extract_single_username(
+            client_fd,
+            command,
+            "REJECT_FRIEND <username>",
+            requester_username
+        )
+    ) {
+        return;
+    }
+
+    const std::string current_username =
+        clients_.at(client_fd).username;
+
+    auto requester_it =
+        users_.find(requester_username);
+
+    if (requester_it == users_.end()) {
+        queue_message(
+            client_fd,
+            "[error] requester account no longer "
+            "exists.\n"
+        );
+        return;
+    }
+
+    auto& current_account =
+        users_.at(current_username);
+
+    if (
+        current_account
+            .incoming_friend_requests
+            .find(requester_username) ==
+        current_account
+            .incoming_friend_requests
+            .end()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] no pending friend request "
+            "from " +
+            requester_username +
+            ".\n"
+        );
+        return;
+    }
+
+    std::string protobuf_event;
+    std::string error;
+
+    if (
+        !serialize_friend_event(
+            FriendEventType::RequestRejected,
+            current_username,
+            requester_username,
+            protobuf_event,
+            error
+        )
+    ) {
+        std::cerr
+            << "failed to serialize friend "
+            << "reject event: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] failed to serialize "
+            "friend event.\n"
+        );
+        return;
+    }
+
+    const FriendMutationResult result =
+        friend_repository_.reject_request(
+            requester_username,
+            current_username,
+            protobuf_event,
+            error
+        );
+
+    if (
+        result ==
+        FriendMutationResult::NotFound
+    ) {
+        queue_message(
+            client_fd,
+            "[error] pending friend request "
+            "was not found in MySQL.\n"
+        );
+        return;
+    }
+
+    if (result == FriendMutationResult::Error) {
+        std::cerr
+            << "REJECT_FRIEND database error: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] database operation failed; "
+            "friend request was not rejected.\n"
+        );
+        return;
+    }
+
+    current_account
+        .incoming_friend_requests
+        .erase(requester_username);
+
+    requester_it->second
+        .outgoing_friend_requests
+        .erase(current_username);
+
+    queue_message(
+        client_fd,
+        "[system] friend request from " +
+        requester_username +
+        " rejected.\n"
+    );
+
+    notify_user_if_online(
+        requester_username,
+        "[system] " +
+        current_username +
+        " rejected your friend request.\n"
+    );
+}
+    //v5：新增删除好友:登陆，提取名字，我的名字，在users里面找
+void ChatServer::handle_remove_friend(
+    int client_fd,
+    const Command& command
+) {
+    if (
+        !require_login(
+            client_fd,
+            "removing friends"
+        )
+    ) {
+        return;
+    }
+
+    std::string friend_username;
+
+    if (
+        !extract_single_username(
+            client_fd,
+            command,
+            "REMOVE_FRIEND <username>",
+            friend_username
+        )
+    ) {
+        return;
+    }
+
+    const std::string current_username =
+        clients_.at(client_fd).username;
+
+    auto friend_it = users_.find(friend_username);
+
+    if (friend_it == users_.end()) {
+        queue_message(
+            client_fd,
+            "[error] user " +
+            friend_username +
+            " does not exist.\n"
+        );
+        return;
+    }
+
+    auto& current_account =
+        users_.at(current_username);
+
+    if (
+        current_account.friends.find(
+            friend_username
+        ) == current_account.friends.end()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] " +
+            friend_username +
+            " is not your friend.\n"
+        );
+        return;
+    }
+
+    std::string protobuf_event;
+    std::string error;
+
+    if (
+        !serialize_friend_event(
+            FriendEventType::FriendRemoved,
+            current_username,
+            friend_username,
+            protobuf_event,
+            error
+        )
+    ) {
+        std::cerr
+            << "failed to serialize friend "
+            << "remove event: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] failed to serialize "
+            "friend event.\n"
+        );
+        return;
+    }
+
+    const FriendMutationResult result =
+        friend_repository_.remove_friend(
+            current_username,
+            friend_username,
+            protobuf_event,
+            error
+        );
+
+    if (
+        result ==
+        FriendMutationResult::NotFound
+    ) {
+        queue_message(
+            client_fd,
+            "[error] friendship was not found "
+            "in MySQL.\n"
+        );
+        return;
+    }
+
+    if (result == FriendMutationResult::Error) {
+        std::cerr
+            << "REMOVE_FRIEND database error: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] database operation failed; "
+            "friendship was not removed.\n"
+        );
+        return;
+    }
+
+    current_account.friends.erase(
+        friend_username
+    );
+
+    friend_it->second.friends.erase(
+        current_username
+    );
+
+    queue_message(
+        client_fd,
+        "[system] removed " +
+        friend_username +
+        " from your friend list.\n"
+    );
+
+    notify_user_if_online(
+        friend_username,
+        "[system] " +
+        current_username +
+        " removed you from their friend list.\n"
+    );
+}
+
+
+    //v5:新增获取好友列表，并且标注是否在线
+void ChatServer::send_friend_list(int client_fd) {
+    if (
+        !require_login(
+            client_fd,
+            "viewing friends"
+        )
+    ) {
+        return;
+    }
+
+    const std::string username =
+        clients_.at(client_fd).username;
+
+    std::vector<std::string> friends(
+        users_.at(username).friends.begin(),
+        users_.at(username).friends.end()
+    );
+
+    std::sort(
+        friends.begin(),
+        friends.end()
+    );
+
+    std::ostringstream output;
+    output
+        << "[system] friends ("
+        << friends.size()
+        << "):\n";
+
+    if (friends.empty()) {
+        output << "  (none)\n";
+    } else {
+        for (const std::string& friend_name :
+             friends) {
+            const bool online =
+                online_users_.find(friend_name) !=
+                online_users_.end();
+
+            output
+                << "  "
+                << friend_name
+                << " ["
+                << (online ? "online" : "offline")
+                << "]\n";
+        }
+    }
+
+    queue_message(client_fd, output.str());
+}
+    //v5显示好友申请列表：发送和接受
+void ChatServer::send_friend_requests(
+    int client_fd
+) {
+    if (
+        !require_login(
+            client_fd,
+            "viewing friend requests"
+        )
+    ) {
+        return;
+    }
+
+    const std::string username =
+        clients_.at(client_fd).username;
+
+    const auto& account = users_.at(username);
+
+    queue_message(
+        client_fd,
+        "[system] incoming requests (" +
+        std::to_string(
+            account
+                .incoming_friend_requests
+                .size()
+        ) +
+        "): " +
+        join_sorted(
+            account.incoming_friend_requests
+        ) +
+        "\n"
+        "[system] outgoing requests (" +
+        std::to_string(
+            account
+                .outgoing_friend_requests
+                .size()
+        ) +
+        "): " +
+        join_sorted(
+            account.outgoing_friend_requests
+        ) +
+        "\n"
+    );
+}
+
+//用户参与的好友事件，了解好友的变更历史
+void ChatServer::handle_friend_events(
+    int client_fd,
+    const Command& command
+) {
+    if (
+        !require_login(
+            client_fd,
+            "viewing friend events"
+        )
+    ) {
+        return;
+    }
+
+    std::size_t count = 0;
+
+    if (//主要是获取查询数量，顺便检查一下是否合规
+        !parse_count(
+            command.raw_arguments,
+            kDefaultFriendEventCount,
+            kMaxFriendEventCount,
+            count
+        )
+    ) {
+        queue_message(
+            client_fd,
+            "[error] usage: FRIEND_EVENTS "
+            "[count], where count is 1-100.\n"
+        );
+        return;
+    }
+
+    const std::string username =
+        clients_.at(client_fd).username;
+
+    std::vector<StoredFriendEvent> stored_events;
+    std::string error;
+
+    if (//加载好友事件
+        !friend_repository_.load_recent_events(
+            username,
+            count,
+            stored_events,//存在这里
+            error
+        )
+    ) {
+        std::cerr
+            << "FRIEND_EVENTS database error: "
+            << error
+            << std::endl;
+
+        queue_message(
+            client_fd,
+            "[error] database operation failed; "
+            "friend events are unavailable.\n"
+        );
+        return;
+    }
+
+    std::ostringstream output;
+    output
+        << "[friend events] showing "
+        << stored_events.size()
+        << " event(s):\n";
+
+    if (stored_events.empty()) {
+        output << "  (none)\n";
+    } else {
+        for (const StoredFriendEvent& stored :
+             stored_events) {
+            FriendEvent event;
+            std::string decode_error;
+
+            if (
+                !FriendEventCodec::deserialize(
+                    stored.protobuf_payload,
+                    event,
+                    decode_error
+                )
+            ) {
+                std::cerr
+                    << "failed to deserialize "
+                    << "friend event #"
+                    << stored.database_id
+                    << ": "
+                    << decode_error
+                    << std::endl;
+
+                output
+                    << "  #"
+                    << stored.database_id
+                    << " [invalid Protobuf "
+                    << "payload]\n";
+
+                continue;
+            }
+
+            output
+                << format_friend_event(
+                    stored.database_id,
+                    event
+                );
+        }
+    }
+
+    queue_message(client_fd, output.str());
+}
 
     //v6新增函数：处理公开历史消息
-    void ChatServer::handle_public_history(int client_fd,const Command& command){
-        if(!require_login(client_fd,"viewing public history"))return;
-        std::size_t count=0;
-        if(!parse_count(command.raw_arguments,kDefaultHistoryCount,kMaxHistoryQueryCount,count)){
-            queue_message(client_fd,"[error] usage: HISTORY_PUBLIC [count], where count is 1-100.\n");
-            return;
-        }
-        const auto messages=message_store_.recent_public(count);
-        std::ostringstream output;
-       output
+void ChatServer::handle_public_history(
+    int client_fd,
+    const Command& command
+) {
+    if (
+        !require_login(
+            client_fd,
+            "viewing public history"
+        )
+    ) {
+        return;
+    }
+
+    std::size_t count = 0;
+
+    if (
+        !parse_count(
+            command.raw_arguments,
+            kDefaultHistoryCount,
+            kMaxHistoryQueryCount,
+            count
+        )
+    ) {
+        queue_message(
+            client_fd,
+            "[error] usage: HISTORY_PUBLIC "
+            "[count], where count is 1-100.\n"
+        );
+        return;
+    }
+
+    const auto messages =
+        message_store_.recent_public(count);
+
+    std::ostringstream output;
+    output
         << "[history public] showing "
         << messages.size()
         << " message(s):\n";
 
-        if(messages.empty()){
-            output<<"(none)\n";
-        }else{
-            for(const ChatMessage& message:messages){
-                output<< format_public_history_line(
-                    message);
-            }
+    if (messages.empty()) {
+        output << "  (none)\n";
+    } else {
+        for (const ChatMessage& message :
+             messages) {
+            output
+                << format_public_history_line(
+                    message
+                );
         }
-        queue_message(client_fd,output.str());
-
     }
+
+    queue_message(client_fd, output.str());
+}
     //v6新增函数：处理私聊历史信息
-    void ChatServer::handle_private_history(int client_fd,const Command& command){
-        if(!require_login(client_fd,"viewing private history"))return;
-        
-        std::string peer_username;
-        std::string count_text;
-        if(!split_first_token(command.raw_arguments,peer_username,count_text)||peer_username.empty()){
-            queue_message(client_fd,"[error] usage: HISTORY_PRIVATE <username> [count]\n");
-            return;
-        }
-        if(!is_valid_username(peer_username)){
-            queue_message(client_fd,"[error] invalid username.\n");
-            return;
-        }
-        if(users_.find(peer_username)==users_.end()){
-            queue_message(client_fd,"[error] user " + peer_username + " does not exist.\n");
-            return;
-        }
-        const std::string current_username=clients_.at(client_fd).username;
-        if(peer_username==current_username){
-            queue_message(client_fd,"[error] private history requires another username.\n");
-            return;
-        }
-        std::size_t count = 0;//查询的消息数量
-        if(!parse_count(
+void ChatServer::handle_private_history(
+    int client_fd,
+    const Command& command
+) {
+    if (
+        !require_login(
+            client_fd,
+            "viewing private history"
+        )
+    ) {
+        return;
+    }
+
+    std::string peer_username;
+    std::string count_text;
+
+    if (
+        !split_first_token(
+            command.raw_arguments,
+            peer_username,
+            count_text
+        ) ||
+        peer_username.empty()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] usage: HISTORY_PRIVATE "
+            "<username> [count]\n"
+        );
+        return;
+    }
+
+    if (!is_valid_username(peer_username)) {
+        queue_message(
+            client_fd,
+            "[error] invalid username.\n"
+        );
+        return;
+    }
+
+    if (
+        users_.find(peer_username) ==
+        users_.end()
+    ) {
+        queue_message(
+            client_fd,
+            "[error] user " +
+            peer_username +
+            " does not exist.\n"
+        );
+        return;
+    }
+
+    const std::string current_username =
+        clients_.at(client_fd).username;
+
+    if (peer_username == current_username) {
+        queue_message(
+            client_fd,
+            "[error] private history requires "
+            "another username.\n"
+        );
+        return;
+    }
+
+    std::size_t count = 0;
+
+    if (
+        !parse_count(
             count_text,
             kDefaultHistoryCount,
             kMaxHistoryQueryCount,
             count
-        )){
-            queue_message(client_fd,"[error] usage: HISTORY_PRIVATE <username> [count], where count is 1-100.\n");
-            return;
-        }
-        const auto messages=message_store_.recent_private(current_username,peer_username,count);
-        std::ostringstream output;
-        output
+        )
+    ) {
+        queue_message(
+            client_fd,
+            "[error] usage: HISTORY_PRIVATE "
+            "<username> [count], where count "
+            "is 1-100.\n"
+        );
+        return;
+    }
+
+    const auto messages =
+        message_store_.recent_private(
+            current_username,
+            peer_username,
+            count
+        );
+
+    std::ostringstream output;
+    output
         << "[history private with "
         << peer_username
         << "] showing "
         << messages.size()
         << " message(s):\n";
 
-        if(messages.empty()){
-            output<<"(none)\n";
-        }else{
-            for(const ChatMessage& message:messages){
-                 output
+    if (messages.empty()) {
+        output << "  (none)\n";
+    } else {
+        for (const ChatMessage& message :
+             messages) {
+            output
                 << format_private_history_line(
                     message
                 );
-            }
         }
-        queue_message(client_fd,output.str());
     }
 
-    void ChatServer::send_private_message(int sender_fd,const std::string& target_username,const std::string& message){
-        //验证登陆状态
-        const auto sender_it=clients_.find(sender_fd);
-        if (sender_it == clients_.end()) {
-            return;
+    queue_message(client_fd, output.str());
+}
+
+void ChatServer::broadcast_to_logged_in(
+    const std::string& message,
+    int excluded_fd
+) {
+    std::vector<int> recipients;
+    recipients.reserve(clients_.size());
+
+    for (const auto& [fd, session] :
+         clients_) {
+        if (
+            session.logged_in &&
+            fd != excluded_fd
+        ) {
+            recipients.push_back(fd);
         }
-        
-        //禁止给自己发消息
-        const std::string sender_username=sender_it->second.username;
-        if(target_username==sender_username){
-            queue_message(
+    }
+
+    for (const int fd : recipients) {
+        queue_message(fd, message);
+    }
+}
+
+void ChatServer::notify_user_if_online(
+    const std::string& username,
+    const std::string& message
+) {
+    const auto online_it =
+        online_users_.find(username);
+
+    if (online_it == online_users_.end()) {
+        return;
+    }
+
+    const int target_fd = online_it->second;
+    const auto client_it =
+        clients_.find(target_fd);
+
+    if (
+        client_it == clients_.end() ||
+        !client_it->second.logged_in ||
+        client_it->second.username != username
+    ) {
+        online_users_.erase(online_it);
+        return;
+    }
+
+    queue_message(target_fd, message);
+}
+
+void ChatServer::send_private_message(
+    int sender_fd,
+    const std::string& target_username,
+    const std::string& message
+) {
+    const auto sender_it =
+        clients_.find(sender_fd);
+
+    if (sender_it == clients_.end()) {
+        return;
+    }
+
+    const std::string sender_username =
+        sender_it->second.username;
+
+    if (target_username == sender_username) {
+        queue_message(
             sender_fd,
-            "[error] you cannot send a private message to yourself.\n");
-            return;
-        }
-
-        if(users_.find(target_username)==users_.end()){
-            queue_message(sender_fd,"[error] user " + target_username +" does not exist.\n");
-            return;
-        }
-        
-
-        //检查好友关系
-        if(!are_friends(sender_username,target_username)){
-            queue_message(sender_fd,"[error] private messaging is allowed only between friends.\n");
-            return;
-        }
-        //在线
-        const auto online_it=online_users_.find(target_username);
-        if(online_it==online_users_.end()){
-            queue_message(sender_fd,"[error] friend "+target_username+" is offline.\n");
-            return;
-        }
-        //会话有效：
-        const int target_fd=online_it->second;
-        const auto target_it=clients_.find(target_fd);
-
-        if(target_it==clients_.end()||!target_it->second.logged_in||target_it->second.username!=target_username){
-            online_users_.erase(online_it);
-            queue_message(sender_fd,"[error] target session is unavailable.\n");
-            return;
-        }
-        message_store_.add_private(sender_username,target_username,message);
-        //发送信息
-        queue_message(target_fd,"[private from "+sender_username+"]"+message+"\n");
-        queue_message(sender_fd,"[private to "+target_username+"]"+message+"\n");
+            "[error] you cannot send a private "
+            "message to yourself.\n"
+        );
+        return;
     }
+
+    if (
+        users_.find(target_username) ==
+        users_.end()
+    ) {
+        queue_message(
+            sender_fd,
+            "[error] user " +
+            target_username +
+            " does not exist.\n"
+        );
+        return;
+    }
+
+    if (
+        !are_friends(
+            sender_username,
+            target_username
+        )
+    ) {
+        queue_message(
+            sender_fd,
+            "[error] private messaging is allowed "
+            "only between friends.\n"
+        );
+        return;
+    }
+
+    const auto online_it =
+        online_users_.find(target_username);
+
+    if (online_it == online_users_.end()) {
+        queue_message(
+            sender_fd,
+            "[error] friend " +
+            target_username +
+            " is offline.\n"
+        );
+        return;
+    }
+
+    const int target_fd = online_it->second;
+    const auto target_it =
+        clients_.find(target_fd);
+
+    if (
+        target_it == clients_.end() ||
+        !target_it->second.logged_in ||
+        target_it->second.username !=
+            target_username
+    ) {
+        online_users_.erase(online_it);
+
+        queue_message(
+            sender_fd,
+            "[error] target session is "
+            "unavailable.\n"
+        );
+        return;
+    }
+
+    message_store_.add_private(
+        sender_username,
+        target_username,
+        message
+    );
+
+    queue_message(
+        target_fd,
+        "[private from " +
+        sender_username +
+        "] " +
+        message +
+        "\n"
+    );
+
+    queue_message(
+        sender_fd,
+        "[private to " +
+        target_username +
+        "] " +
+        message +
+        "\n"
+    );
+}
     //v6新增功能
-    bool ChatServer::require_login(int client_fd,const std::string& action){
-        const auto it=clients_.find(client_fd);
-        if(it==clients_.end())return false;
-        if(it->second.logged_in){
-            return true;
-        }
-        queue_message(client_fd,"[error] you must LOGIN before "+action+".\n");
+bool ChatServer::require_login(
+    int client_fd,
+    const std::string& action
+) {
+    const auto it = clients_.find(client_fd);
+
+    if (it == clients_.end()) {
         return false;
     }
+
+    if (it->second.logged_in) {
+        return true;
+    }
+
+    queue_message(
+        client_fd,
+        "[error] you must LOGIN before " +
+        action +
+        ".\n"
+    );
+
+    return false;
+}
 
     // v2新增解析命令函数
     // 实现：首先判断长度是1到20之间，其次只能游数字字母下划线构成，其他组成不通过
     // 目的：判断昵称是否合规
 
-    bool ChatServer::is_valid_username(const std::string &username)
-    {
-        if (username.size() < 3|| username.size() > 20)
-            return false;
-        for (char ch : username)
-        {
-            const unsigned char value = static_cast<unsigned char>(ch);
-            if (!std::isalnum(value) && ch != '_')
-                return false;
-        }
-        return true;
+bool ChatServer::is_valid_username(
+    const std::string& username
+) {
+    if (
+        username.size() < 3 ||
+        username.size() > 20
+    ) {
+        return false;
     }
+
+    for (const char ch : username) {
+        const unsigned char value =
+            static_cast<unsigned char>(ch);
+
+        if (
+            !std::isalnum(value) &&
+            ch != '_'
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
     // v3新增密码检验函数
     // 实现：先看大小符合不符合，再看有没有空格或者控制字符
-    bool ChatServer::is_valid_password(const std::string &password)
-    {
-        if (password.size() < 4 || password.size() > 64)
-        {
+bool ChatServer::is_valid_password(
+    const std::string& password
+) {
+    if (
+        password.size() < 4 ||
+        password.size() > 64
+    ) {
+        return false;
+    }
+
+    for (const char ch : password) {
+        const unsigned char value =
+            static_cast<unsigned char>(ch);
+
+        if (
+            std::isspace(value) ||
+            std::iscntrl(value)
+        ) {
             return false;
         }
-        for (char ch : password)
-        {
-            const unsigned char value = static_cast<unsigned char>(ch);
-            if (std::isspace(value) ||!std::isprint(value))
-                return false;
-        }
-        return true;
     }
+
+    return true;
+}
     
     //v5:双方是不是好友
-    bool ChatServer::are_friends(const std::string& left,const std::string& right)const{
-        const auto left_it=users_.find(left);
-        const auto right_it=users_.find(right);
-        if(left_it==users_.end()||right_it==users_.end())return false;
-        bool left_has_right=left_it->second.friends.find(right)!=left_it->second.friends.end();
-        bool right_has_left=right_it->second.friends.find(left)!=right_it->second.friends.end();
-        return left_has_right&&right_has_left;
+bool ChatServer::are_friends(
+    const std::string& left,
+    const std::string& right
+) const {
+    const auto left_it = users_.find(left);
+    const auto right_it = users_.find(right);
 
+    if (
+        left_it == users_.end() ||
+        right_it == users_.end()
+    ) {
+        return false;
     }
+
+    const bool left_has_right =
+        left_it->second.friends.find(right) !=
+        left_it->second.friends.end();
+
+    const bool right_has_left =
+        right_it->second.friends.find(left) !=
+        right_it->second.friends.end();
+
+    return left_has_right && right_has_left;
+}
     //v5:帮助好友功能分离一个用户名
-    bool ChatServer::extract_single_username(int client_fd,const Command& command,const std::string& usage,std::string& username){
-        const std::vector<std::string> arguments=split_words(command.raw_arguments);
-        if(arguments.size()!=1){
-            queue_message(client_fd,"[error] usage: "+usage+"\n");
-            return false;
-        }
-        username=arguments[0];
-        if(!is_valid_username(username)){
-            queue_message(client_fd,"[error] invalid username.\n");
-            return false;
-        }
-        return true;
+bool ChatServer::extract_single_username(
+    int client_fd,
+    const Command& command,
+    const std::string& usage,
+    std::string& username
+) {
+    const auto arguments =
+        split_words(command.raw_arguments);
+
+    if (arguments.size() != 1) {
+        queue_message(
+            client_fd,
+            "[error] usage: " +
+            usage +
+            "\n"
+        );
+        return false;
     }
 
-    //v5：目标是否在线
-    void ChatServer::notify_user_if_online(const std::string& username,const std::string& message){
-        const auto online_it=online_users_.find(username);
-        if(online_it==online_users_.end())return;
-        const int target_fd=online_it->second;
-        const auto client_it=clients_.find(target_fd);
-        if(client_it==clients_.end()||!client_it->second.logged_in||username!=client_it->second.username){
-            online_users_.erase(online_it);
-            return;
-        }
-        queue_message(target_fd,message);
+    username = arguments[0];
+
+    if (!is_valid_username(username)) {
+        queue_message(
+            client_fd,
+            "[error] invalid username.\n"
+        );
+        return false;
     }
+
+    return true;
+}
+
     //v5：把用户名列表排序，并且转字符串后返回
-    std::string ChatServer::join_sorted(const std::unordered_set<std::string>& values){
-        if(values.empty())return "(none)";
-
-        std::vector<std::string> sorted(values.begin(),values.end());
-        std::sort(sorted.begin(),sorted.end());
-
-        std::ostringstream output;
-        for(std::size_t index=0;index<sorted.size();++index){
-            if(index!=0)output<<", ";
-            output<<sorted[index];
-        }
-        return output.str();
+std::string ChatServer::join_sorted(
+    const std::unordered_set<std::string>& values
+) {
+    if (values.empty()) {
+        return "(none)";
     }
+
+    std::vector<std::string> sorted(
+        values.begin(),
+        values.end()
+    );
+
+    std::sort(
+        sorted.begin(),
+        sorted.end()
+    );
+
+    std::ostringstream output;
+
+    for (std::size_t index = 0;
+         index < sorted.size();
+         ++index) {
+        if (index > 0) {
+            output << ", ";
+        }
+
+        output << sorted[index];
+    }
+
+    return output.str();
+}
     
     //v6新增函数，处理查询历史消息
-    std::string ChatServer::format_public_history_line(const ChatMessage& message) {
-        std::ostringstream output;
-        output
+std::string
+ChatServer::format_public_history_line(
+    const ChatMessage& message
+) {
+    std::ostringstream output;
+    output
         << "  #"
         << message.id
         << " "
@@ -1289,10 +2702,14 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
         << "\n";
 
     return output.str();
-    }
-    std::string ChatServer::format_private_history_line(const ChatMessage& message) {
-        std::ostringstream output;
-        output
+}
+
+std::string
+ChatServer::format_private_history_line(
+    const ChatMessage& message
+) {
+    std::ostringstream output;
+    output
         << "  #"
         << message.id
         << " "
@@ -1308,9 +2725,135 @@ void ChatServer::close_client(int client_fd,bool announce_offline)
         << "\n";
 
     return output.str();
+}
+
+//序列化好友操作的信息
+bool ChatServer::serialize_friend_event(
+    FriendEventType type,
+    const std::string& actor_username,
+    const std::string& target_username,
+    std::string& payload,
+    std::string& error
+) {//获取当前的时间
+    const auto now =
+        std::chrono::system_clock::now();
+
+    const auto unix_ms =
+        std::chrono::duration_cast<
+            std::chrono::milliseconds
+        >(
+            now.time_since_epoch()
+        ).count();
+//将信息组装成结构体
+    const FriendEvent event{
+        type,
+        actor_username,
+        target_username,
+        unix_ms
+    };
+//序列化
+    return FriendEventCodec::serialize(
+        event,
+        payload,
+        error
+    );
+}
+//将从数据库获得的已经反序列化的结构体转换称文本行
+std::string ChatServer::format_friend_event(
+    std::uint64_t database_id,
+    const FriendEvent& event
+) {
+    std::ostringstream output;
+//#123 2026-08-04 14:23:45 alice sent a friend request to bob
+//数据库序号（#123）格式化的时间戳（2026-08-04 14:23:45）事件的具体描述（根据 event.type 生成）
+    output
+        << "  #"
+        << database_id
+        << " "
+        << format_unix_ms(
+            event.occurred_at_unix_ms
+        )
+        << " ";
+//处理四种事件类型
+    switch (event.type) {
+        case FriendEventType::RequestSent:
+            output
+                << event.actor_username
+                << " sent a friend request to "
+                << event.target_username;
+            break;
+
+        case FriendEventType::RequestAccepted:
+            output
+                << event.actor_username
+                << " accepted "
+                << event.target_username
+                << "'s friend request";
+            break;
+
+        case FriendEventType::RequestRejected:
+            output
+                << event.actor_username
+                << " rejected "
+                << event.target_username
+                << "'s friend request";
+            break;
+
+        case FriendEventType::FriendRemoved:
+            output
+                << event.actor_username
+                << " removed "
+                << event.target_username
+                << " from their friend list";
+            break;
+
+        case FriendEventType::Unspecified:
+        default:
+            output << "unknown friend event";
+            break;
     }
 
+    output << "\n";
+    return output.str();
+}
+//事件格式化，把数据库中的UNIX毫秒时间戳转化称人类可读
+std::string ChatServer::format_unix_ms(
+    std::int64_t unix_ms
+) {//处理无效时间戳
+    if (unix_ms < 0) {
+        return "invalid-time";
+    }
+//毫秒转秒
+    const std::time_t seconds =
+        static_cast<std::time_t>(
+            unix_ms / 1000
+        );
+//转换为本地时间
+    std::tm local_time{};
 
+    if (
+        localtime_r(
+            &seconds,
+            &local_time
+        ) == nullptr
+    ) {
+        return "invalid-time";
+    }
+//拼接输出字符串
+    std::ostringstream output;
+
+    output
+        << std::put_time(
+            &local_time,
+            "%Y-%m-%d %H:%M:%S"
+        )
+        << "."
+        << std::setw(3)
+        << std::setfill('0')
+        << (unix_ms % 1000);
+
+    return output.str();
+}
     
 }
 

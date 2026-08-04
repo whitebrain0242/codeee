@@ -8,7 +8,7 @@
 #include <system_error>
 
 namespace chat{
-    //trim:
+//trim:
 //v2新增解析命令函数
 //实现：
 //目的：用于删除字符串开头和结尾的空格/tab/\r------不同系统的换行格式不同需要处理

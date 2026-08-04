@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(chatroom_v7_1 LANGUAGES CXX)
+project(chatroom_v7_2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,77 @@ target_include_directories(
     PUBLIC include
 )
 
+option(
+    CHATROOM_USE_SYSTEM_PROTOBUF
+    "Use official Protobuf generated C++ classes when available"
+    ON
+)
+
+if(CHATROOM_USE_SYSTEM_PROTOBUF)
+    find_package(Protobuf QUIET)
+endif()
+
+if(
+    Protobuf_FOUND AND
+    Protobuf_PROTOC_EXECUTABLE
+)
+    protobuf_generate_cpp(
+        FRIEND_EVENT_PROTO_SRCS
+        FRIEND_EVENT_PROTO_HDRS
+        proto/friend_event.proto
+    )
+
+    add_library(chat_serialization
+        src/friend_event_codec_official.cpp
+        ${FRIEND_EVENT_PROTO_SRCS}
+        ${FRIEND_EVENT_PROTO_HDRS}
+    )
+
+    target_include_directories(
+        chat_serialization
+        PUBLIC
+            include
+            ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    target_link_libraries(
+        chat_serialization
+        PUBLIC protobuf::libprotobuf
+    )
+
+    target_compile_definitions(
+        chat_serialization
+        PUBLIC CHATROOM_OFFICIAL_PROTOBUF=1
+    )
+
+    message(
+        STATUS
+        "Using official Protobuf generated C++ classes"
+    )
+else()
+    add_library(chat_serialization
+        src/friend_event_codec.cpp
+    )
+
+    target_include_directories(
+        chat_serialization
+        PUBLIC include
+    )
+
+    target_compile_definitions(
+        chat_serialization
+        PUBLIC CHATROOM_BUNDLED_PROTOBUF_CODEC=1
+    )
+
+    message(
+        WARNING
+        "Official Protobuf development tools were not found; "
+        "using the bundled proto3-compatible codec. "
+        "Install protobuf-compiler and libprotobuf-dev "
+        "to use protoc-generated classes."
+    )
+endif()
+
 add_library(chat_security
     src/password_hasher.cpp
 )
@@ -54,6 +125,7 @@ target_link_libraries(
 add_library(chat_database
     src/database_config.cpp
     src/mysql_user_repository.cpp
+    src/mysql_friend_repository.cpp
 )
 
 target_include_directories(
@@ -80,7 +152,9 @@ target_include_directories(
 
 target_link_libraries(
     chat_server_core
-    PUBLIC chat_common
+    PUBLIC
+        chat_common
+        chat_serialization
 )
 
 add_executable(chat_server
@@ -106,6 +180,7 @@ target_link_libraries(
 foreach(
     target
     chat_common
+    chat_serialization
     chat_security
     chat_database
     chat_server_core
@@ -146,9 +221,33 @@ if(BUILD_TESTING)
     )
 
     add_executable(
+        test_friend_event_codec
+        tests/test_friend_event_codec.cpp
+    )
+
+    target_link_libraries(
+        test_friend_event_codec
+        PRIVATE chat_serialization
+    )
+
+    target_compile_options(
+        test_friend_event_codec
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+    add_test(
+        NAME friend_event_codec
+        COMMAND test_friend_event_codec
+    )
+
+    add_executable(
         chat_server_test
         tests/test_server_main.cpp
         tests/in_memory_user_repository.cpp
+        tests/in_memory_friend_repository.cpp
     )
 
     target_include_directories(

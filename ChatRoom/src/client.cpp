@@ -13,7 +13,6 @@
 namespace
 {
     constexpr std::size_t kBufferSize = 4096;
-
     int connect_to_server(const std::string &ip, int port)
     {
         const int socket_fd =

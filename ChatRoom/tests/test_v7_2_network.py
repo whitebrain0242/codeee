@@ -143,6 +143,63 @@ def main() -> int:
             response,
         )
 
+        response = alice.command(
+            "FRIEND_EVENTS 10",
+            0.35,
+        )
+        expect(
+            "alice sent a friend request to bob"
+            in response,
+            "friend event request deserialized",
+            response,
+        )
+        expect(
+            "bob accepted alice's friend request"
+            in response,
+            "friend event acceptance deserialized",
+            response,
+        )
+
+        response = bob.command(
+            "FRIEND_EVENTS 1",
+            0.35,
+        )
+        expect(
+            "bob accepted alice's friend request"
+            in response,
+            "friend event latest count",
+            response,
+        )
+        expect(
+            "sent a friend request" not in response,
+            "friend event older row excluded",
+            response,
+        )
+
+        response = charlie.command(
+            "FRIEND_EVENTS 10",
+            0.35,
+        )
+        expect(
+            "showing 0 event(s)" in response,
+            "third party friend events isolated",
+            response,
+        )
+
+        response = guest.command("FRIEND_EVENTS")
+        expect(
+            "must LOGIN" in response,
+            "guest friend events rejected",
+            response,
+        )
+
+        response = alice.command("FRIEND_EVENTS 0")
+        expect(
+            "count is 1-100" in response,
+            "friend event count validated",
+            response,
+        )
+
         for client in [alice, bob, charlie, guest]:
             client.clear()
 
@@ -281,6 +338,17 @@ def main() -> int:
         )
 
         response = alice.command(
+            "FRIEND_EVENTS 1",
+            0.35,
+        )
+        expect(
+            "alice removed bob from their friend list"
+            in response,
+            "friend removal event deserialized",
+            response,
+        )
+
+        response = alice.command(
             "HISTORY_PRIVATE bob 2",
             0.35,
         )
@@ -291,7 +359,7 @@ def main() -> int:
             response,
         )
 
-        print("all v7.1 network regression tests passed")
+        print("all v7.2 network regression tests passed")
         return 0
 
     finally:

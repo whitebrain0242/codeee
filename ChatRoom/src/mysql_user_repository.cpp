@@ -7,6 +7,7 @@
 #include <type_traits>
 #include <utility>
 namespace chat{
+    
 namespace{
 //匿名命名空间：把内部实现细节隐藏起来，只在这个cpp文件内部可见，不会暴露在其他地方
 struct StatementCloser{

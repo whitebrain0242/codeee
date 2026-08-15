@@ -21,17 +21,18 @@ public:
     TlsServerContext() = default;
     ~TlsServerContext();
 
+    //创建ctx,TLS版本，证书，私钥加载，检查
     bool initialize(
         const TlsServerConfig& config,
         std::string& error
     );
 
-    SslPtr createSsl(
+    SslPtr createSsl(//服务器创建SSL对象
         int socketFd,
         std::string& error
     ) const;
 
-    bool initialized() const noexcept;
+    bool initialized() const noexcept;//判断是否已初始化
 
 private:
     SSL_CTX* context_ = nullptr;

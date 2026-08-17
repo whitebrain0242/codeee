@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package chatroom.v9;
+// 定义 .resume.pb
+enum FileTransferScope {
+  FILE_TRANSFER_SCOPE_UNSPECIFIED = 0;
+  FILE_TRANSFER_PRIVATE = 1;   // 私聊文件
+  FILE_TRANSFER_GROUP = 2;     // 群聊文件
+}
+
+message FileTransferMetadata {
+  // 1. 传输令牌（Token）
+  //    客户端生成的 32 位十六进制随机字符串
+  //    用于在服务器磁盘上定位对应的 .part 临时文件
+  string transfer_token = 1;
+
+  // 2. 传输范围（私聊 / 群聊）
+  //    决定了最终文件分发的目标类型
+  FileTransferScope scope = 2;
+
+  // 3. 发送者用户名
+  //    用于身份校验：恢复续传时，只有原发送者才能继续操作
+  string sender_username = 3;
+
+  // 4. 接收者用户名（仅私聊时有效）
+  //    如果 scope = FILE_TRANSFER_PRIVATE，此字段存目标用户名
+  string recipient_username = 4;
+
+  // 5. 群组 ID（仅群聊时有效）
+  //    如果 scope = FILE_TRANSFER_GROUP，此字段存群组自增主键 ID
+  //    与下面的 group_name 互补，便于恢复时反查
+  uint64 group_id = 5;
+
+  // 6. 群组名称（仅群聊时有效）
+  //    人类可读的群名，用于恢复时快速识别或日志记录
+  string group_name = 6;
+
+  // 7. 文件名
+  //    原始文件名（经 sanitize_filename 清理过，去除路径风险字符）
+  //    用于最终落盘时的文件名，以及向接收者展示
+  string file_name = 7;
+
+  // 8. 文件大小（单位：字节）
+  //    上传时客户端声明的大小，服务器接收完毕后将以此校验完整性
+  uint64 file_size = 8;
+
+  // 9. 文件 SHA256 哈希值（十六进制字符串，固定 64 位）
+  //    双重校验的第一道防线：
+  //    - 上传完成时，校验磁盘 .part 文件的哈希是否与此一致
+  //    - 接收者下载完成后，也用此值校验本地文件
+  string sha256_hex = 9;
+
+  // 10. 创建时间（Unix 毫秒时间戳）
+  //     用于后台清理任务：当服务器长时间未完成传输，可据此删除过期临时文件
+  int64 created_at_unix_ms = 10;
+
+  // 11. 存储相对路径（最终归档路径）
+  //     当文件完整上传并通过 SHA256 校验后，.part 文件会被原子重命名到此处
+  //     即 data/server_files/files/{token}_{filename}
+  //     存入 metadata 是为了防止移动后丢失文件位置，便于后续下载分发
+  string stored_relative_path = 11;
+}
+
+message FileUploadResumeState {
+  // 1. 文件元数据（即上面定义的所有信息）
+  //    包含了发送者、接收者、群组、大小、哈希等全部上下文
+  FileTransferMetadata metadata = 1;
+
+  // 2. 接收者用户名列表（repeated 表示可重复，即数组/列表）
+  //    【核心用途】群聊上传时，文件还没校验完，不能先查数据库插入投递记录
+  //    所以先把群成员名单暂存在这里（快照）
+  //    等文件最终校验完成并落盘后，直接读取此列表，批量插入 MySQL
+  //    注意：对于私聊，此列表通常只包含 1 个元素（即 recipient_username）
+  repeated string recipient_usernames = 2;
+}
+

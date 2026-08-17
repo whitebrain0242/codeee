@@ -1,0 +1,55 @@
+syntax = "proto3";
+package chatroom.v7;
+
+enum FriendEventType {
+  // 0 是 protobuf 的默认值，必须保留，表示“未指定/无效事件”
+  FRIEND_EVENT_TYPE_UNSPECIFIED = 0;
+
+  // 1. 好友请求已发送
+  //    场景：A 向 B 发送了好友申请
+  //    此时 actor_username = A（发起者），target_username = B（接收者）
+  FRIEND_REQUEST_SENT = 1;
+
+  // 2. 好友请求已接受
+  //    场景：B 同意了 A 的好友申请，双方正式成为好友
+  //    此时 actor_username = B（操作者），target_username = A（被操作者）
+  //    注意：与 SENT 相比，actor 和 target 的角色发生了翻转
+  FRIEND_REQUEST_ACCEPTED = 2;
+
+  // 3. 好友请求已拒绝
+  //    场景：B 拒绝了 A 的好友申请
+  //    此时 actor_username = B（操作者），target_username = A（被操作者）
+  //    拒绝后，friend_requests 表中的对应记录会被删除
+  FRIEND_REQUEST_REJECTED = 3;
+
+  // 4. 好友已移除（删除好友）
+  //    场景：A 将 B 从好友列表中移除（单向操作）
+  //    此时 actor_username = A（操作者），target_username = B（被移除者）
+  //    移除后，friendships 表中的对应关系被删除
+  //    注意：此操作不需要对方同意，是单向的
+  FRIEND_REMOVED = 4;
+}
+
+message FriendEventPayload {
+  // 1. 事件类型（上面枚举定义的四选一）
+  //    决定了解析此事件时需要展示的文案和逻辑
+  FriendEventType type = 1;
+
+  // 2. 操作者用户名（动作的发起方）
+  //    即“谁干了这件事”
+  //    例如：发送请求的人、接受/拒绝请求的人、删除好友的人
+  string actor_username = 2;
+
+  // 3. 目标用户名（动作的接收方）
+  //    即“这件事发生在谁身上”
+  //    例如：被请求的人、被接受/被拒绝的人、被删除的人
+  string target_username = 3;
+
+  // 4. 事件发生时间（Unix 毫秒时间戳）
+  //    由 ChatServer 在操作执行的瞬间通过 now_unix_ms() 生成
+  //    用于按时间线排序显示“好友动态”
+  //    注意：这个时间戳由应用层生成，不依赖 MySQL 的 CURRENT_TIMESTAMP，
+  //     保证在多服务器分布式环境下时间的一致性（如果服务器时钟同步）
+  int64 occurred_at_unix_ms = 4;
+}
+

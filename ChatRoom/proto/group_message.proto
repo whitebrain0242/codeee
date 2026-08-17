@@ -1,0 +1,32 @@
+syntax = "proto3";
+package chatroom.v8;
+
+message GroupMessagePayload {
+  // 1. 群组 ID（数据库自增主键）
+  //    用于精确关联到 chat_groups 表
+  //    为什么需要存这个？因为群名可能会变，但 group_id 永不变化
+  //    查询历史消息时，只需按 group_id 索引即可
+  uint64 group_id = 1;
+
+  // 2. 群组名称（发送瞬间的快照）
+  //    为什么同时存 group_id 和 group_name？
+  //    - group_name 是“展示字段”：让历史消息显示当时群叫什么名字
+  //    - 即使群主后来改了群名，这条历史消息依然保留发消息时的群名
+  //    - 而 group_id 是“关联字段”：用于权限校验（确保发消息的人还在群里）
+  string group_name = 2;
+
+  // 3. 发送者用户名
+  //    谁发的这条消息
+  //    用于历史消息展示时显示“发言人”
+  string sender_username = 3;
+
+  // 4. 消息正文
+  //    支持 UTF-8 中文，最大长度由业务层限制（kMaxChatMessage = 1000 字节）
+  string content = 4;
+
+  // 5. 消息创建时间（Unix 毫秒时间戳）
+  //    由 ChatServer 在收到消息时通过 now_unix_ms() 生成
+  //    用于历史消息按时间排序
+  //    为什么不依赖 MySQL 的 TIMESTAMP？因为多服务器部署时，应用层时间戳能保证一致性
+  int64 created_at_unix_ms = 5;
+}

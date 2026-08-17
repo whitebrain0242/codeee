@@ -1,0 +1,19 @@
+syntax = "proto3";
+package chatroom.v7;
+
+// 聊天消息类型枚举
+enum ChatMessageType {
+  CHAT_MESSAGE_TYPE_UNSPECIFIED = 0; // 未指定（保留值）
+  PUBLIC = 1;                        // 公共聊天（广播给所有在线用户）
+  PRIVATE = 2;                       // 私聊（点对点）
+}
+
+// 聊天消息的完整数据载荷
+// 该结构会被序列化为二进制存入 MySQL 的 payload 字段
+message ChatMessagePayload {
+  ChatMessageType type = 1;              // 消息类型（公开/私聊）
+  string sender_username = 2;            // 发送者用户名
+  string recipient_username = 3;         // 接收者用户名（仅私聊时有效）
+  string content = 4;                    // 消息正文（支持 UTF-8 中文）
+  int64 created_at_unix_ms = 5;          // 创建时间戳（毫秒级 Unix 时间）
+}

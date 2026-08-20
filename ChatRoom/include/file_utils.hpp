@@ -32,8 +32,8 @@ std::string make_transfer_token();
 std::string sanitize_filename(
     const std::string& filename
 );
-//文件上传不是谁都能传的。服务端先下发一个一次性、短时效的 Token（比如 60 秒过期），客户端拿着 Token 才能 POST 文件。防止未授权上传和重放攻击（Replay Attack）
-//校验传输令牌是否合法（格式/长度/有效期等）
+//文件上传不是谁都能传的。服务端先给客户端一个Token（比如 60 秒过期），客户端拿着 Token 才能 POST 文件。防止未授权上传和重放攻击（Replay Attack）
+//校验Token是否合法（格式/长度/有效期等）
 bool is_valid_transfer_token(
     const std::string& token
 );

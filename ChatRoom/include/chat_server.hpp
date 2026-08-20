@@ -288,7 +288,7 @@ private:
         const TcpConnectionPtr& connection,
         const std::string& arguments
     );
-
+    
     void handle_file_begin_private(
         const TcpConnectionPtr& connection,
         ClientSession& session,

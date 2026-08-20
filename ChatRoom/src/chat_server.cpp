@@ -4421,8 +4421,7 @@ void ChatServer::deliver_file_to_user(
         transfer.id
     ] = transfer;
 
-    // The server sends only metadata first. The receiver inspects its
-    // local .part file and answers FILE_RESUME_REQUEST <id> <offset>.
+
     connection->send(
         file_transfer_service_
             .make_offer_line(

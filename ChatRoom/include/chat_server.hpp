@@ -7,7 +7,6 @@
 #include "server/client_session.hpp"
 #include "server/command_router.hpp"
 #include "server/direct_message_policy.hpp"
-#include "server/heartbeat_manager.hpp"
 #include "server/online_user_registry.hpp"
 
 #include "minimuduo/net/Callbacks.hpp"
@@ -35,9 +34,9 @@ public:
         minimuduo::net::TcpServer& tcp_server,
         MySqlDatabase& database,
         RedisClient& redis,
-        std::string server_instance_id,//在redis中的ID
-        unsigned int presence_ttl_seconds,//过期时间
-        std::filesystem::path file_storage_root//文件系统路径
+        std::string server_instance_id,
+        unsigned int presence_ttl_seconds,
+        std::filesystem::path file_storage_root
     );
 
     ~ChatServer();
@@ -46,35 +45,35 @@ public:
     ChatServer& operator=(const ChatServer&) = delete;
 
 private:
-    static constexpr std::size_t kMaxInputBuffer = 8192;//单条TCP消息的最大缓冲区
-    static constexpr std::size_t kMaxChatMessage = 1000;//单条聊天消息的最大字节数
-    static constexpr std::size_t kDefaultHistoryCount = 20;//默认查询消息数量
-    static constexpr std::size_t kMaxHistoryCount = 100;//查询的最大数量
-    static constexpr std::size_t kOfflineDeliveryBatch = 100;//登录时推送的消息上线
-    static constexpr std::size_t kOfflineFileDeliveryBatch = 10;//一次性最多推送文件数量
-    static constexpr std::uint64_t kMaxFileSize = 20ULL * 1024ULL * 1024ULL;//20MB，上传的最大文件大小
-    static constexpr std::size_t kMaxFileChunkBytes = 3072U;//单个网络包解码后的最大字节数
+    static constexpr std::size_t kMaxInputBuffer = 8192;
+    static constexpr std::size_t kMaxChatMessage = 1000;
+    static constexpr std::size_t kDefaultHistoryCount = 20;
+    static constexpr std::size_t kMaxHistoryCount = 100;
+    static constexpr std::size_t kOfflineDeliveryBatch = 100;
+    static constexpr std::size_t kOfflineFileDeliveryBatch = 10;
+    static constexpr std::uint64_t kMaxFileSize = 100ULL * 1024ULL * 1024ULL * 1024ULL;
+    static constexpr std::uint64_t kMaxFileFrameBytes = 4ULL * 1024ULL * 1024ULL;
 
     minimuduo::net::TcpServer& tcp_server_;
     MySqlDatabase& database_;
     RedisClient& redis_;
-    std::string server_instance_id_;//服务器ID
-    unsigned int presence_ttl_seconds_;//redis在线状态的过期时间
-    FileTransferService file_transfer_service_;//文件传输引擎
-    //Redis在线状态刷新线程
+    std::string server_instance_id_;
+    unsigned int presence_ttl_seconds_;
+    FileTransferService file_transfer_service_;
+
     std::atomic<bool> stopping_{false};
     std::mutex presence_wait_mutex_;
     std::condition_variable presence_wait_cv_;
     std::thread presence_refresh_thread_;
 
-    OnlineUserRegistry online_users_;//在线注册表
-    DirectMessagePolicy direct_message_policy_;//私聊/传文件前的检测-是否好友-是否屏蔽
-    HeartbeatManager heartbeat_manager_;//扫描所有连接，定时发送PING，超市强制关闭
-    ServerCommandRouter command_router_;//命令路由器
+    OnlineUserRegistry online_users_;
+    DirectMessagePolicy direct_message_policy_;
+    ServerCommandRouter command_router_;
 
-    //为什么使用两个锁？这是因为，两个操作独立，如果共用一个锁的话，彼此之间需要等待，降低服务器的并发能力
-    std::mutex friend_operation_mutex_;//好友操作互斥锁
-    std::mutex group_operation_mutex_;//群组操作互斥锁
+    // v7.3 was single-threaded. After moving to SubReactors these compound
+    // check+write business operations need their own serialization boundary.
+    std::mutex friend_operation_mutex_;
+    std::mutex group_operation_mutex_;
 
     void on_connection(const TcpConnectionPtr& connection);
     void on_message(
@@ -151,22 +150,22 @@ private:
     );
 
 
-    void handle_block_friend(
-        const TcpConnectionPtr& connection,
-        const ClientSession& session,
-        const std::string& arguments
-    );
+void handle_block_friend(
+    const TcpConnectionPtr& connection,
+    const ClientSession& session,
+    const std::string& arguments
+);
 
-    void handle_unblock_friend(
-        const TcpConnectionPtr& connection,
-        const ClientSession& session,
-        const std::string& arguments
-    );
+void handle_unblock_friend(
+    const TcpConnectionPtr& connection,
+    const ClientSession& session,
+    const std::string& arguments
+);
 
-    void handle_blocked_friends(
-        const TcpConnectionPtr& connection,
-        const ClientSession& session
-    );
+void handle_blocked_friends(
+    const TcpConnectionPtr& connection,
+    const ClientSession& session
+);
 
     void handle_friends(
         const TcpConnectionPtr& connection,
@@ -279,16 +278,12 @@ private:
     );
 
 
-    void handle_ping(
-        const TcpConnectionPtr& connection,
-        const std::string& arguments
-    );
+void handle_ping(
+    const TcpConnectionPtr& connection,
+    const std::string& arguments
+);
 
-    void handle_pong(
-        const TcpConnectionPtr& connection,
-        const std::string& arguments
-    );
-    
+
     void handle_file_begin_private(
         const TcpConnectionPtr& connection,
         ClientSession& session,
@@ -481,4 +476,3 @@ private:
         const std::string& error
     ) const;
 };
-

@@ -1,12 +1,16 @@
 #include "chat_server.hpp"
 #include "config.hpp"
 #include "protocol.hpp"
+#include "server/server_console.hpp"
+#include "server/server_log.hpp"
 
 #include "integration/redis_client.hpp"
 
 #include "minimuduo/net/EventLoop.hpp"
 #include "minimuduo/net/TcpServer.hpp"
 #include "minimuduo/net/TlsContext.hpp"
+
+#include <spdlog/spdlog.h>
 
 #include <arpa/inet.h>
 #include <csignal>
@@ -35,6 +39,9 @@ int main(int argc, char* argv[]) {
 
     std::filesystem::path file_storage_root =
         "data/server_files";
+
+    std::filesystem::path log_directory =
+        "logs";
 
     if (argc >= 2 &&
         !parse_port(argv[1], port)) {
@@ -83,12 +90,31 @@ int main(int argc, char* argv[]) {
             argv[6];
     }
 
+    if (argc >= 8) {
+        log_directory =
+            argv[7];
+    }
+
     (void)std::signal(
         SIGPIPE,
         SIG_IGN
     );
 
     std::string error;
+
+    if (!initialize_server_logging(
+            log_directory,
+            error
+        )) {
+        std::cerr
+            << error
+            << '\n';
+        return 1;
+    }
+
+    spdlog::info(
+        "starting chat server bootstrap"
+    );
 
     MySqlConfig mysql_config;
 
@@ -158,6 +184,19 @@ int main(int argc, char* argv[]) {
             << '\n';
         return 1;
     }
+
+    if (!database.ping(error)) {
+        spdlog::error(
+            "MySQL pool health check failed: {}",
+            error
+        );
+        return 1;
+    }
+
+    spdlog::info(
+        "MySQL pool ready with {} connections",
+        database.pool_size()
+    );
 
     RedisClient redis;
 
@@ -230,25 +269,33 @@ int main(int argc, char* argv[]) {
 
     tcp_server.start();
 
-    std::cout
-        << "chat_server v8.4 listening on port "
-        << port
-        << " with 1 MainReactor + "
-        << worker_threads
-        << " SubReactor(s)\n"
-        << "TLS: required, minimum TLS 1.2"
-           ", maximum TLS 1.3 when supported\n"
-        << "TLS certificate: "
-        << tls_config.certificate_file
-        << '\n'
-        << "Heartbeat: PING every 20s, timeout 60s; "
-           "Linux TCP keepalive 60/15/3 is also enabled\n"
-        << "Redis presence server id: "
-        << server_instance_id
-        << '\n'
-        << "File storage root: "
-        << file_storage_root.string()
-        << '\n';
+    ServerConsoleInfo console_info;
+    console_info.port = port;
+    console_info.worker_threads =
+        worker_threads;
+    console_info.tls_certificate =
+        tls_config.certificate_file;
+    console_info.server_instance_id =
+        server_instance_id;
+    console_info.file_storage_root =
+        file_storage_root;
+    console_info.log_directory =
+        log_directory;
+    console_info.mysql_pool_size =
+        static_cast<unsigned int>(
+            database.pool_size()
+        );
+
+    print_server_console(
+        console_info
+    );
+
+    spdlog::info(
+        "server ready on port {} with {} worker reactor(s); "
+        "heartbeat=client PING/server PONG; file_payload=raw binary",
+        port,
+        worker_threads
+    );
 
     main_loop.loop();
 

@@ -64,6 +64,15 @@ bool configureCommonContext(
         context,
         SSL_OP_NO_COMPRESSION
     );
+
+#ifdef SSL_OP_ENABLE_KTLS
+    // Keep TLS semantics while allowing Linux/OpenSSL to move eligible
+    // file payloads with kernel TLS + SSL_sendfile zero-copy.
+    SSL_CTX_set_options(
+        context,
+        SSL_OP_ENABLE_KTLS
+    );
+#endif
     return true;
 }
 

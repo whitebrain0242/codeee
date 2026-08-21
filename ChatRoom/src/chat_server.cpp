@@ -8,6 +8,8 @@
 #include "minimuduo/net/TcpConnection.hpp"
 #include "minimuduo/net/TcpServer.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <any>
 #include <charconv>
@@ -47,37 +49,10 @@ bool parse_uint64_value(
     return true;
 }
 
-std::string encode_text_base64(
+std::string encode_text_token(
     const std::string& text
 ) {
-    const std::vector<unsigned char> bytes(
-        text.begin(),
-        text.end()
-    );
-
-    return fileutil::base64_encode(bytes);
-}
-
-bool decode_text_base64(
-    const std::string& encoded,
-    std::string& text,
-    std::string& error
-) {
-    std::vector<unsigned char> bytes;
-
-    if (!fileutil::base64_decode(
-            encoded,
-            bytes,
-            error
-        )) {
-        return false;
-    }
-
-    text.assign(
-        bytes.begin(),
-        bytes.end()
-    );
-    return true;
+    return fileutil::percent_encode(text);
 }
 
 }  // namespace
@@ -101,9 +76,6 @@ ChatServer::ChatServer(
       ),
       direct_message_policy_(
           database
-      ),
-      heartbeat_manager_(
-          HeartbeatConfig{}
       ) {
     std::string file_error;
     if (!file_transfer_service_.initialize(file_error)) {
@@ -128,8 +100,6 @@ ChatServer::ChatServer(
     );
 
     configure_command_routes();
-    heartbeat_manager_.start();
-
     presence_refresh_thread_ =
         std::thread([this] {
             presence_refresh_loop();
@@ -137,7 +107,6 @@ ChatServer::ChatServer(
 }
 
 ChatServer::~ChatServer() {
-    heartbeat_manager_.stop();
     file_transfer_service_.stop();
 
     stopping_.store(true);
@@ -162,10 +131,6 @@ void ChatServer::on_connection(
     const TcpConnectionPtr& connection
 ) {
     if (connection->connected()) {
-        heartbeat_manager_.attach(
-            connection
-        );
-
         connection->setContext(
             std::make_shared<ClientSession>()
         );
@@ -177,17 +142,19 @@ void ChatServer::on_connection(
             << connection->peerAddressText()
             << '\n';
 
+        spdlog::info(
+            "client connected: {} from {}",
+            connection->name(),
+            connection->peerAddressText()
+        );
+
         connection->send(
             "[system] connected to chatroom v8.4 "
-            "(decoupled Reactor + TLS + heartbeat + blocking + resumable files).\n"
+            "(Reactor + TLS + client-initiated heartbeat + blocking + raw resumable files).\n"
             "[system] Type HELP for commands.\n"
         );
         return;
     }
-
-    heartbeat_manager_.detach(
-        connection
-    );
 
     const std::shared_ptr<ClientSession> session =
         session_of(connection);
@@ -211,16 +178,17 @@ void ChatServer::on_connection(
         << "client disconnected: "
         << connection->name()
         << '\n';
+
+    spdlog::info(
+        "client disconnected: {}",
+        connection->name()
+    );
 }
 
 void ChatServer::on_message(
     const TcpConnectionPtr& connection,
     minimuduo::net::Buffer* buffer
 ) {
-    heartbeat_manager_.note_activity(
-        connection
-    );
-
     const std::shared_ptr<ClientSession> session =
         session_of(connection);
 
@@ -232,23 +200,109 @@ void ChatServer::on_message(
         return;
     }
 
-    while (const char* eol = buffer->findEOL()) {
+    while (connection->connected()) {
+        if (session->binary_upload &&
+            session->binary_upload
+                ->remaining_bytes > 0U) {
+            if (!session->upload ||
+                session->upload->token !=
+                    session->binary_upload->token) {
+                session->binary_upload.reset();
+                connection->send(
+                    "[error] binary upload state is invalid.\n"
+                );
+                connection->forceClose();
+                return;
+            }
+
+            if (buffer->readableBytes() == 0U) {
+                return;
+            }
+
+            PendingBinaryUploadFrame& frame =
+                *session->binary_upload;
+
+            const std::size_t consume =
+                static_cast<std::size_t>(
+                    std::min<std::uint64_t>(
+                        frame.remaining_bytes,
+                        static_cast<std::uint64_t>(
+                            buffer->readableBytes()
+                        )
+                    )
+                );
+
+            std::uint64_t accepted_offset = 0U;
+            std::string error;
+
+            if (!file_transfer_service_
+                     .append_upload_bytes(
+                         session->upload->temp_path,
+                         frame.next_offset,
+                         buffer->peek(),
+                         consume,
+                         accepted_offset,
+                         error
+                     )) {
+                const std::string token =
+                    session->upload->token;
+
+                pause_file_upload(
+                    connection,
+                    *session,
+                    token,
+                    error
+                );
+                return;
+            }
+
+            buffer->retrieve(consume);
+
+            frame.next_offset =
+                accepted_offset;
+
+            frame.remaining_bytes -=
+                static_cast<std::uint64_t>(
+                    consume
+                );
+
+            session->upload->received_size =
+                accepted_offset;
+
+            if (frame.remaining_bytes == 0U) {
+                session->binary_upload.reset();
+            }
+
+            continue;
+        }
+
+        const char* eol =
+            buffer->findEOL();
+
+        if (eol == nullptr) {
+            break;
+        }
+
         const std::size_t line_size =
             static_cast<std::size_t>(
                 eol - buffer->peek()
             );
 
         std::string line =
-            buffer->retrieveAsString(line_size);
+            buffer->retrieveAsString(
+                line_size
+            );
 
-        // Consume '\n'.
         buffer->retrieve(1U);
 
-        if (!line.empty() && line.back() == '\r') {
+        if (!line.empty() &&
+            line.back() == '\r') {
             line.pop_back();
         }
 
-        const Command command = parse_command(line);
+        const Command command =
+            parse_command(line);
+
         if (!command.name.empty()) {
             handle_command(
                 connection,
@@ -256,13 +310,11 @@ void ChatServer::on_message(
                 command
             );
         }
-
-        if (!connection->connected()) {
-            return;
-        }
     }
 
-    if (buffer->readableBytes() > kMaxInputBuffer) {
+    if (!session->binary_upload &&
+        buffer->readableBytes() >
+            kMaxInputBuffer) {
         connection->send(
             "[error] input line is too long; "
             "connection will close.\n"
@@ -326,7 +378,7 @@ void ChatServer::send_help(
         "  HISTORY_GROUP <group_name> [count]\n"
         "  PENDING\n"
         "  QUIT\n"
-        "[system] PING/PONG are reserved heartbeat protocol commands.\n"
+        "[system] PING is a reserved client heartbeat command; server replies PONG.\n"
         "[system] chat_client local file commands:\n"
         "  SEND_FILE <username> <path>\n"
         "  SEND_GROUP_FILE <group_name> <path>\n"
@@ -480,7 +532,7 @@ void ChatServer::handle_login(
         remove_online_user(words[0], connection);
         return;
     }
-    //修改内存中的对象状态，标记为已登录
+
     session.logged_in = true;
     session.username = words[0];
 
@@ -496,22 +548,22 @@ void ChatServer::handle_login(
         " is online.\n",
         connection
     );
-    //好友申请同志
+
     notify_pending_requests(
         connection,
         session.username
     );
-    //拉取未读消息树
+
     send_redis_unread_summary_best_effort(
         connection,
         session.username
     );
-    //拉取离线消息
+
     deliver_pending_messages(
         connection,
         session.username
     );
-    //拉取离线文件
+
     deliver_pending_files(
         connection,
         session.username
@@ -3140,7 +3192,7 @@ void ChatServer::handle_file_begin_private(
         !fileutil::is_valid_sha256_hex(
             words[4]
         ) ||
-        !decode_text_base64(
+        !fileutil::percent_decode(
             words[2],
             filename,
             error
@@ -3391,7 +3443,7 @@ void ChatServer::handle_file_begin_group(
         !fileutil::is_valid_sha256_hex(
             words[4]
         ) ||
-        !decode_text_base64(
+        !fileutil::percent_decode(
             words[2],
             filename,
             error
@@ -3633,91 +3685,54 @@ void ChatServer::handle_file_chunk(
 
     if (words.size() != 3U ||
         !session.upload ||
-        session.upload->token != token) {
+        session.upload->token != token ||
+        session.binary_upload) {
         pause_file_upload(
             connection,
             session,
             token,
-            "no matching active upload; resend FILE_BEGIN to resume"
+            "invalid or overlapping binary FILE_CHUNK frame"
         );
         return;
     }
 
     std::uint64_t offset = 0U;
+    std::uint64_t byte_count = 0U;
 
     if (!parse_uint64_value(
             words[1],
             offset
         ) ||
+        !parse_uint64_value(
+            words[2],
+            byte_count
+        ) ||
+        byte_count == 0U ||
+        byte_count >
+            kMaxFileFrameBytes ||
         offset !=
             session.upload
-                ->received_size) {
+                ->received_size ||
+        session.upload->received_size +
+                byte_count >
+            session.upload->expected_size) {
         pause_file_upload(
             connection,
             session,
             token,
-            "file chunk offset mismatch"
+            "invalid binary file frame offset/length"
         );
         return;
     }
 
-    std::vector<unsigned char> bytes;
-    std::string error;
+    PendingBinaryUploadFrame frame;
+    frame.token = token;
+    frame.next_offset = offset;
+    frame.remaining_bytes =
+        byte_count;
 
-    if (!fileutil::base64_decode(
-            words[2],
-            bytes,
-            error
-        ) ||
-        bytes.size() >
-            kMaxFileChunkBytes) {
-        pause_file_upload(
-            connection,
-            session,
-            token,
-            error.empty()
-                ? "file chunk is too large"
-                : error
-        );
-        return;
-    }
-
-    if (session.upload->received_size +
-            static_cast<std::uint64_t>(
-                bytes.size()
-            ) >
-        session.upload->expected_size) {
-        pause_file_upload(
-            connection,
-            session,
-            token,
-            "file data exceeds declared size"
-        );
-        return;
-    }
-
-    std::uint64_t accepted_offset = 0U;
-
-    if (!file_transfer_service_
-             .append_upload_chunk(
-                 session.upload
-                     ->temp_path,
-                 offset,
-                 bytes,
-                 accepted_offset,
-                 error
-             )) {
-        pause_file_upload(
-            connection,
-            session,
-            token,
-            error
-        );
-        return;
-    }
-
-    session.upload->received_size =
-        accepted_offset;
+    session.binary_upload =
+        std::move(frame);
 }
 
 void ChatServer::handle_file_end(
@@ -3819,7 +3834,7 @@ void ChatServer::handle_file_end(
                 "FILE_REJECT " +
                 token +
                 " " +
-                encode_text_base64(
+                encode_text_token(
                     reason
                 ) +
                 "\n"
@@ -3851,7 +3866,7 @@ void ChatServer::handle_file_end(
             "FILE_REJECT " +
             token +
             " " +
-            encode_text_base64(
+            encode_text_token(
                 error
             ) +
             "\n"
@@ -3893,7 +3908,7 @@ void ChatServer::handle_file_end(
             "FILE_REJECT " +
             token +
             " " +
-            encode_text_base64(
+            encode_text_token(
                 "database failed to persist file transfer"
             ) +
             "\n"
@@ -3999,7 +4014,7 @@ void ChatServer::handle_file_abort(
         "FILE_REJECT " +
         token +
         " " +
-        encode_text_base64(
+        encode_text_token(
             "client cancelled upload"
         ) +
         "\n"
@@ -4421,7 +4436,8 @@ void ChatServer::deliver_file_to_user(
         transfer.id
     ] = transfer;
 
-
+    // The server sends only metadata first. The receiver inspects its
+    // local .part file and answers FILE_RESUME_REQUEST <id> <offset>.
     connection->send(
         file_transfer_service_
             .make_offer_line(
@@ -4437,6 +4453,7 @@ void ChatServer::detach_active_upload(
     // Intentionally keep server tmp/<token>.part and .resume.pb.
     // They are the durable upload checkpoint used after reconnect/restart.
     session.upload.reset();
+    session.binary_upload.reset();
 }
 
 void ChatServer::pause_file_upload(
@@ -4453,7 +4470,7 @@ void ChatServer::pause_file_upload(
         "FILE_PAUSED " +
         token +
         " " +
-        encode_text_base64(
+        encode_text_token(
             reason
         ) +
         "\n"
@@ -4474,7 +4491,7 @@ void ChatServer::reject_file_upload(
         "FILE_REJECT " +
         token +
         " " +
-        encode_text_base64(
+        encode_text_token(
             reason
         ) +
         "\n"
@@ -5321,6 +5338,12 @@ void ChatServer::database_error(
     const std::string& operation,
     const std::string& error
 ) const {
+    spdlog::error(
+        "database operation failed: {}: {}",
+        operation,
+        error
+    );
+
     std::cerr
         << "database error while "
         << operation

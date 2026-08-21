@@ -107,6 +107,20 @@ bool load_mysql_config(const std::string& path, MySqlConfig& config, std::string
         }
         config.connect_timeout_seconds = parsed;
     }
+    
+    if (values.count("pool_size")) {
+        unsigned int parsed = 0;
+        if (!parse_unsigned(
+                values["pool_size"],
+                parsed
+            ) ||
+            parsed == 0U ||
+            parsed > 64U) {
+            error = "MySQL pool_size must be 1-64";
+            return false;
+        }
+        config.pool_size = parsed;
+    }
 
     // 强制检查：user 和 database 必填
     if (config.user.empty()) { error = "MySQL config requires user"; return false; }

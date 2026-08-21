@@ -161,7 +161,7 @@ static bool send_upload_begin(
             " " +
             upload.target +
             " " +
-            encode_text_base64(
+            encode_text_token(
                 upload.file_name
             ) +
             " " +
@@ -456,83 +456,20 @@ static bool send_upload_data(
         return false;
     }
 
-    std::ifstream input(
-        upload.source_path,
-        std::ios::binary
-    );
-
-    if (!input) {
-        std::cerr
-            << "[local file error] cannot reopen "
-            << upload.source_path
-            << '\n';
-
-        (void)send_all(transport,
-            "FILE_ABORT " +
-                upload.token +
-                "\n"
-        );
-
-        return false;
-    }
-
-    input.seekg(
-        static_cast<std::streamoff>(
-            start_offset
-        ),
-        std::ios::beg
-    );
-
-    if (!input) {
-        std::cerr
-            << "[local file error] cannot seek local file to resume offset "
-            << start_offset
-            << ".\n";
-
-        (void)send_all(transport,
-            "FILE_ABORT " +
-                upload.token +
-                "\n"
-        );
-
-        return false;
-    }
-
-    std::vector<unsigned char> buffer(
-        kFileChunkBytes
-    );
-
     std::uint64_t offset =
         start_offset;
 
-    while (input) {
-        input.read(
-            reinterpret_cast<char*>(
-                buffer.data()
-            ),
-            static_cast<std::streamsize>(
-                buffer.size()
-            )
-        );
+    bool reported_mode = false;
 
-        const std::streamsize count =
-            input.gcount();
-
-        if (count <= 0) {
-            break;
-        }
-
-        std::vector<unsigned char> chunk(
-            buffer.begin(),
-            buffer.begin() + count
-        );
-
-        const std::string encoded =
-            fileutil::base64_encode(
-                chunk
+    while (offset < upload.file_size) {
+        const std::uint64_t frame_size =
+            std::min<std::uint64_t>(
+                upload.file_size - offset,
+                kFileFrameBytes
             );
 
-        if (!send_all(transport,
+        if (!send_all(
+                transport,
                 "FILE_CHUNK " +
                     upload.token +
                     " " +
@@ -540,40 +477,55 @@ static bool send_upload_data(
                         offset
                     ) +
                     " " +
-                    encoded +
+                    std::to_string(
+                        frame_size
+                    ) +
                     "\n"
             )) {
             return false;
         }
 
+        bool used_zero_copy = false;
+        std::string error;
+
+        if (!transport.send_file(
+                upload.source_path,
+                offset,
+                frame_size,
+                used_zero_copy,
+                error
+            )) {
+            std::cerr
+                << "[local file error] raw file send failed: "
+                << error
+                << '\n';
+            return false;
+        }
+
+        if (!reported_mode) {
+            std::cout
+                << "[file transport] "
+                << (
+                       used_zero_copy
+                           ? "kTLS SSL_sendfile zero-copy enabled"
+                           : "raw binary streaming fallback "
+                             "(kTLS zero-copy unavailable)"
+                   )
+                << ".\n";
+            reported_mode = true;
+        }
+
         offset +=
-            static_cast<std::uint64_t>(
-                count
-            );
+            frame_size;
     }
 
-    if (!input.eof() ||
-        offset != upload.file_size) {
-        std::cerr
-            << "[local file error] file changed or "
-               "read failed during upload; task remains in SQLite.\n";
-
-        (void)send_all(transport,
-            "FILE_ABORT " +
+    return send_all(
+        transport,
+        "FILE_END " +
             upload.token +
             "\n"
-        );
-
-        return false;
-    }
-
-    return send_all(transport,
-        "FILE_END " +
-        upload.token +
-        "\n"
     );
 }
-
 
 static bool begin_incoming_download(
     TlsClientTransport& transport,
@@ -612,18 +564,18 @@ static bool begin_incoming_download(
     std::string file_name;
     std::string error;
 
-    if (!decode_text_base64(
+    if (!decode_text_token(
             words[3],
             group_name,
             error
         ) ||
-        !decode_text_base64(
+        !decode_text_token(
             words[4],
             file_name,
             error
         )) {
         std::cerr
-            << "[file error] invalid FILE_OFFER base64: "
+            << "[file error] invalid FILE_OFFER text token: "
             << error
             << '\n';
         return false;
@@ -934,27 +886,17 @@ static bool begin_incoming_download(
     return true;
 }
 
-static bool append_download_chunk(
-    const std::vector<std::string>& words,
+bool consume_file_binary_payload(
+    TlsClientTransport& transport,
+    std::string& server_buffer,
     ClientState& state
 ) {
-    if (words.size() != 3U) {
-        return false;
+    if (state.binary_download.remaining_bytes == 0U) {
+        return true;
     }
 
-    std::uint64_t transfer_id = 0U;
-    std::uint64_t offset = 0U;
-
-    if (!parse_uint64(
-            words[0],
-            transfer_id
-        ) ||
-        !parse_uint64(
-            words[1],
-            offset
-        )) {
-        return false;
-    }
+    const std::uint64_t transfer_id =
+        state.binary_download.transfer_id;
 
     const auto iterator =
         state.downloads.find(
@@ -963,46 +905,44 @@ static bool append_download_chunk(
 
     if (iterator ==
         state.downloads.end()) {
+        state.binary_download = {};
         return false;
+    }
+
+    if (server_buffer.empty()) {
+        return true;
     }
 
     IncomingDownload& download =
         iterator->second;
 
-    if (offset !=
-        download.received_size) {
-        std::cerr
-            << "[file error] #F"
-            << transfer_id
-            << " chunk offset mismatch: expected "
-            << download.received_size
-            << ", got "
-            << offset
-            << ".\n";
-        return false;
-    }
-
-    std::vector<unsigned char> bytes;
-    std::string error;
-
-    if (!fileutil::base64_decode(
-            words[2],
-            bytes,
-            error
-        ) ||
-        bytes.size() >
-            kFileChunkBytes ||
-        download.received_size +
+    const std::size_t consume =
+        static_cast<std::size_t>(
+            std::min<std::uint64_t>(
+                state.binary_download
+                    .remaining_bytes,
                 static_cast<std::uint64_t>(
-                    bytes.size()
-                ) >
-            download.expected_size) {
-        std::cerr
-            << "[file error] #F"
-            << transfer_id
-            << " invalid chunk: "
-            << error
-            << '\n';
+                    server_buffer.size()
+                )
+            )
+        );
+
+    if (download.received_size +
+            static_cast<std::uint64_t>(
+                consume
+            ) >
+        download.expected_size) {
+        state.binary_download = {};
+
+        (void)send_all(
+            transport,
+            "FILE_RECEIVE_FAILED " +
+                std::to_string(
+                    transfer_id
+                ) +
+                "\n"
+        );
+
         return false;
     }
 
@@ -1013,36 +953,40 @@ static bool append_download_chunk(
     );
 
     if (!output) {
-        std::cerr
-            << "[file error] cannot append "
-            << download.temp_path
-            << '\n';
+        state.binary_download = {};
         return false;
     }
 
-    if (!bytes.empty()) {
-        output.write(
-            reinterpret_cast<const char*>(
-                bytes.data()
-            ),
-            static_cast<std::streamsize>(
-                bytes.size()
-            )
-        );
-    }
+    output.write(
+        server_buffer.data(),
+        static_cast<std::streamsize>(
+            consume
+        )
+    );
 
     if (!output) {
-        std::cerr
-            << "[file error] write failed for #F"
-            << transfer_id
-            << '\n';
+        state.binary_download = {};
         return false;
     }
+
+    server_buffer.erase(
+        0,
+        consume
+    );
 
     download.received_size +=
         static_cast<std::uint64_t>(
-            bytes.size()
+            consume
         );
+
+    state.binary_download.remaining_bytes -=
+        static_cast<std::uint64_t>(
+            consume
+        );
+
+    if (state.binary_download.remaining_bytes == 0U) {
+        state.binary_download = {};
+    }
 
     return true;
 }
@@ -1319,7 +1263,7 @@ bool handle_file_protocol_line(
             std::string reason;
             std::string error;
 
-            if (!decode_text_base64(
+            if (!decode_text_token(
                     words[1],
                     reason,
                     error
@@ -1354,7 +1298,7 @@ bool handle_file_protocol_line(
             std::string reason;
             std::string error;
 
-            if (!decode_text_base64(
+            if (!decode_text_token(
                     words[1],
                     reason,
                     error
@@ -1574,35 +1518,64 @@ bool handle_file_protocol_line(
                 command.raw_arguments
             );
 
-        if (!append_download_chunk(
-                words,
-                state
-            )) {
-            std::cerr
-                << "[file error] invalid FILE_DATA; "
-                   "partial file is retained when possible.\n";
+        std::uint64_t transfer_id = 0U;
+        std::uint64_t offset = 0U;
+        std::uint64_t byte_count = 0U;
 
-            if (!words.empty()) {
-                std::uint64_t transfer_id = 0U;
-
-                if (parse_uint64(
-                        words[0],
-                        transfer_id
-                    )) {
-                    (void)send_all(transport,
-                        "FILE_RECEIVE_FAILED " +
-                            std::to_string(
-                                transfer_id
-                            ) +
-                            "\n"
-                    );
-
-                    state.downloads.erase(
-                        transfer_id
-                    );
-                }
-            }
+        if (words.size() != 3U ||
+            !parse_uint64(
+                words[0],
+                transfer_id
+            ) ||
+            !parse_uint64(
+                words[1],
+                offset
+            ) ||
+            !parse_uint64(
+                words[2],
+                byte_count
+            ) ||
+            byte_count == 0U ||
+            byte_count >
+                kFileFrameBytes ||
+            state.binary_download
+                    .remaining_bytes !=
+                0U) {
+            return true;
         }
+
+        const auto iterator =
+            state.downloads.find(
+                transfer_id
+            );
+
+        if (iterator ==
+                state.downloads.end() ||
+            iterator->second.received_size !=
+                offset ||
+            offset + byte_count >
+                iterator->second.expected_size) {
+            (void)send_all(
+                transport,
+                "FILE_RECEIVE_FAILED " +
+                    std::to_string(
+                        transfer_id
+                    ) +
+                    "\n"
+            );
+
+            state.downloads.erase(
+                transfer_id
+            );
+
+            return true;
+        }
+
+        state.binary_download.transfer_id =
+            transfer_id;
+
+        state.binary_download.remaining_bytes =
+            byte_count;
 
         return true;
     }
@@ -1645,4 +1618,5 @@ void preserve_partial_downloads(
     // Deliberately keep *.part files. SQLite partial_downloads stores their
     // identity, while the actual file size is the resume offset.
     state.downloads.clear();
+    state.binary_download = {};
 }

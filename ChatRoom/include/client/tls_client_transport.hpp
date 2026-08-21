@@ -4,7 +4,10 @@
 #include "minimuduo/net/TlsContext.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <string>
+
 
 enum class TransportReadStatus {
     Data,
@@ -45,6 +48,16 @@ public:
         const std::string& data,
         std::string& error
     );
+    
+    bool send_file(
+        const std::filesystem::path& path,
+        std::uint64_t offset,
+        std::uint64_t byte_count,
+        bool& used_zero_copy,
+        std::string& error
+    );
+
+    bool zero_copy_send_available() const noexcept;
     //从 TLS 连接中读取最多 capacity 字节数据到 buffer 中
     TransportReadResult receive(
         char* buffer,

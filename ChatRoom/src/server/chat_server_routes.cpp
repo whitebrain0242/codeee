@@ -1,6 +1,6 @@
 #include "chat_server.hpp"
 #include "minimuduo/net/TcpConnection.hpp"
-//解析曾对字符串进行拆分之后,会在这里进行路由,找到对应的处理函数
+
 void ChatServer::configure_command_routes() {
     auto add_arguments_handler =
         [this](
@@ -308,20 +308,6 @@ void ChatServer::configure_command_routes() {
             const Command& command
         ) {
             handle_ping(
-                connection,
-                command.raw_arguments
-            );
-        }
-    );
-
-    command_router_.add(
-        "PONG",
-        [this](
-            const TcpConnectionPtr& connection,
-            ClientSession&,
-            const Command& command
-        ) {
-            handle_pong(
                 connection,
                 command.raw_arguments
             );

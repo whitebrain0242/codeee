@@ -36,6 +36,13 @@ struct IncomingDownload {
     std::filesystem::path temp_path;//临时文件路径
     std::filesystem::path final_path;//最终文件路径
 };
+
+struct PendingBinaryDownloadFrame {
+    std::uint64_t transfer_id = 0;
+    std::uint64_t remaining_bytes = 0;
+};
+
+
 //客户端状态
 struct ClientState {
     std::string active_username;//以登陆的用户名
@@ -57,4 +64,7 @@ struct ClientState {
         std::uint64_t,
         IncomingDownload
     > downloads;//以当前transferID为键的下载任务集合
+
+    PendingBinaryDownloadFrame
+        binary_download;
 };

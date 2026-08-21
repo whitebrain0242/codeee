@@ -28,6 +28,13 @@ bool handle_file_protocol_line(
     ClientState& state,
     SqliteClient& cache
 );
+
+bool consume_file_binary_payload(
+    TlsClientTransport& transport,
+    std::string& server_buffer,
+    ClientState& state
+);
+
 //客户端主动断开连接的时候,推出程序或者取消下载调用,遍历state.downloads，对于未完成的下载，可能会将临时文件（.part）保留在磁盘上
 void preserve_partial_downloads(
     ClientState& state

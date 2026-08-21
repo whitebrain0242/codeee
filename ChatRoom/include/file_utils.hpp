@@ -7,17 +7,16 @@
 #include <vector>
 //文件安全传输/交换
 namespace fileutil {
-//你通过 JSON 或 HTTP Header 返回文件哈希值或 Token 时，二进制数据没法直接放进去，Base64 把它们转成纯文本。解决二进制数据在文本协议中的传输问题
-//将二进制数据编码为 Base64 字符串（常用于文本传输）
-std::string base64_encode(
-    const std::vector<unsigned char>& bytes
+std::string percent_encode(
+    const std::string& text
 );
-//解码 Base64 字符串转二进制
-bool base64_decode(
+
+bool percent_decode(
     const std::string& encoded,
-    std::vector<unsigned char>& bytes,
+    std::string& text,
     std::string& error
 );
+
 //计算文件的 SHA256 哈希值，返回十六进制字符串
 //大文件上传/下载完成后，服务端算一遍哈希，和客户端传过来的对比。如果不一致，说明网络传输丢包或磁盘损坏，直接丢弃重传。防止文件损坏被业务层误用
 bool sha256_file_hex(

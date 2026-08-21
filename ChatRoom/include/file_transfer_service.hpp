@@ -57,6 +57,16 @@ public:
         std::uint64_t& accepted_offset,//写入后,服务器磁盘中新的文件大小,告诉客户端当前文件大小
         std::string& error
     );
+    
+    bool append_upload_bytes(
+        const std::filesystem::path& temp_path,
+        std::uint64_t expected_offset,
+        const char* bytes,
+        std::size_t byte_count,
+        std::uint64_t& accepted_offset,
+        std::string& error
+    );
+
     //检验文件大小+比对哈希值+rename临时文件移动到内存目录中,删除元数据文件read+rename+unlink
     bool finalize_upload(
         const std::filesystem::path& temp_path,//,part文件路径

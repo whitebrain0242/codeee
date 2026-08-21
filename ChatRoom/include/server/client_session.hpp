@@ -33,12 +33,22 @@ struct IncomingFileUpload {
     //断电续传状态
     FileUploadResumeState resume_state;
 };
+
+struct PendingBinaryUploadFrame {
+    std::string token;
+    std::uint64_t next_offset = 0;
+    std::uint64_t remaining_bytes = 0;
+};
+
+
 //客户端的一个完整会话
 struct ClientSession {
     bool logged_in = false;
     std::string username;//登陆的账号
     //当前正在进行的上传任务
     std::optional<IncomingFileUpload>upload;
+
+    std::optional<PendingBinaryUploadFrame>binary_upload;
     //正在接收/下载中的文件传输ID集合。
     std::unordered_set<std::uint64_t>file_deliveries_in_progress;
     //已接收并存储、准备供此用户下载的离线文件列表。

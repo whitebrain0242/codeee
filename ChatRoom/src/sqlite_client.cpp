@@ -40,8 +40,12 @@ bool SqliteClient::open(const std::string& database_path, std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
     close_locked(); // 如果之前打开过，先关掉
 
-    // 自动创建父目录
-    std::filesystem::create_directories(std::filesystem::path(database_path).parent_path());
+    if (database_path != ":memory:") {
+        std::filesystem::path dir = std::filesystem::path(database_path).parent_path();
+        if (!dir.empty()) {
+            std::filesystem::create_directories(dir);
+        }
+    }
 
     // 打开数据库
     sqlite3_open_v2(database_path.c_str(), &database_, 

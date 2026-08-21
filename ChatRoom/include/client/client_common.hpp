@@ -14,13 +14,14 @@ inline constexpr std::size_t
 //本地历史消息的最大上限
 inline constexpr std::size_t
     kMaxLocalHistory = 200U;
-//文件传输时单次发送/接受的数据快大小
-inline constexpr std::size_t
-    kFileChunkBytes = 3072U;
 //客户端可接受/发送的最大文件大小设置
 inline constexpr std::uint64_t
     kMaxFileSize =
-        20ULL * 1024ULL * 1024ULL;//20MB
+        100ULL * 1024ULL * 1024ULL * 1024ULL;
+//每收到4MB,就写入一次磁盘.part文件中,在内存中更新哈希值
+inline constexpr std::uint64_t
+    kFileFrameBytes =
+        4ULL * 1024ULL * 1024ULL;
 //获取当前系统的时间戳
 std::int64_t client_now_unix_ms();
 //判断字符串text是否以prefix 开头,用于快速路由
@@ -33,14 +34,14 @@ bool parse_uint64(
     const std::string& text,//带解析的字符串
     std::uint64_t& value//通过引用传递
 );
-//对输入字符串进行Base64编码,返回编码后的字符串
-std::string encode_text_base64(
+//将文本进行 Percent-Encoding,返回编码后的字符串
+std::string encode_text_token(
     const std::string& text
 );
-//将编码后的字符串解码为原始文本,存入text
-bool decode_text_base64(
-    const std::string& encoded,//已经编码的字符串
-    std::string& text,//解码后还原出的原始字符串
+//：将编码后的令牌 解码回原始文本,存入text
+bool decode_text_token(
+    const std::string& encoded,
+    std::string& text,
     std::string& error
 );
 //检查当前客户端是否已经有激活的登陆账户

@@ -11,6 +11,7 @@ struct MySqlConfig {
     std::string password;
     std::string database = "chatroom";
     unsigned int connect_timeout_seconds = 5;
+    unsigned int pool_size = 8;
 };
 
 struct RedisConfig {

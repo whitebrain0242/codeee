@@ -14,44 +14,109 @@
 //加密、编解码、文件安全操作和随机令牌生成
 namespace fileutil {
 
-std::string base64_encode(const std::vector<unsigned char>& bytes) {
-    if (bytes.empty()) return {};
-    // 输出长度=4 * ceil(输入长度 / 3)
-    const int output_size = 4 * static_cast<int>((bytes.size() + 2U) / 3U);
-    std::string encoded(static_cast<std::size_t>(output_size), '\0');
-    //使用 OpenSSL 的 EVP_EncodeBlock（底层 C 函数），它不会自动补 =，但会返回实际写入的字符数（不含 \0）。
-    const int written = EVP_EncodeBlock(
-        reinterpret_cast<unsigned char*>(encoded.data()),
-        bytes.data(),
-        static_cast<int>(bytes.size())
-    );
+std::string percent_encode(
+    const std::string& text
+) {
+    static constexpr char hex[] =
+        "0123456789ABCDEF";
 
-    if (written < 0) return {};
-    encoded.resize(static_cast<std::size_t>(written));
+    std::string encoded;
+    encoded.reserve(text.size() * 3U);
+
+    for (unsigned char ch : text) {
+        const bool unreserved =
+            std::isalnum(ch) != 0 ||
+            ch == '-' ||
+            ch == '_' ||
+            ch == '.' ||
+            ch == '~';
+
+        if (unreserved) {
+            encoded.push_back(
+                static_cast<char>(ch)
+            );
+            continue;
+        }
+
+        encoded.push_back('%');
+        encoded.push_back(
+            hex[(ch >> 4U) & 0x0FU]
+        );
+        encoded.push_back(
+            hex[ch & 0x0FU]
+        );
+    }
+
     return encoded;
 }
 
-bool base64_decode(const std::string& encoded, std::vector<unsigned char>& bytes, std::string& error) {
-    if (encoded.empty()) { bytes.clear(); return true; }
-    if (encoded.size() % 4U != 0U) { error = "invalid base64 length"; return false; }
-    //先检查长度是否为 4 的倍数（Base64 规范）
-    std::vector<unsigned char> decoded(encoded.size() / 4U * 3U);
-    //EVP_DecodeBlock 会解码包括 = 在内的所有字符，但返回的是填充前的实际字节数（即包括 = 的占位）。所以需要手动根据末尾 = 数量调整最终长度（一个 = 减 1 字节，两个 = 减 2 字节）
-    const int written = EVP_DecodeBlock(
-        decoded.data(),
-        reinterpret_cast<const unsigned char*>(encoded.data()),
-        static_cast<int>(encoded.size())
-    );
+bool percent_decode(
+    const std::string& encoded,
+    std::string& text,
+    std::string& error
+) {
+    auto hex_value = [](
+        unsigned char ch
+    ) -> int {
+        if (ch >= '0' && ch <= '9') {
+            return ch - '0';
+        }
+        if (ch >= 'a' && ch <= 'f') {
+            return 10 + ch - 'a';
+        }
+        if (ch >= 'A' && ch <= 'F') {
+            return 10 + ch - 'A';
+        }
+        return -1;
+    };
 
-    if (written < 0) { error = "invalid base64 data"; return false; }
+    std::string decoded;
+    decoded.reserve(encoded.size());
 
-    // 处理末尾的 '=' 填充符（Base64 标准填充）
-    std::size_t actual = static_cast<std::size_t>(written);
-    if (!encoded.empty() && encoded.back() == '=') --actual;
-    if (encoded.size() >= 2U && encoded[encoded.size() - 2U] == '=') --actual;
+    for (std::size_t i = 0U;
+         i < encoded.size();) {
+        if (encoded[i] != '%') {
+            decoded.push_back(encoded[i]);
+            ++i;
+            continue;
+        }
 
-    decoded.resize(actual);
-    bytes = std::move(decoded);
+        if (i + 2U >= encoded.size()) {
+            error =
+                "truncated percent escape";
+            return false;
+        }
+
+        const int high =
+            hex_value(
+                static_cast<unsigned char>(
+                    encoded[i + 1U]
+                )
+            );
+
+        const int low =
+            hex_value(
+                static_cast<unsigned char>(
+                    encoded[i + 2U]
+                )
+            );
+
+        if (high < 0 || low < 0) {
+            error =
+                "invalid percent escape";
+            return false;
+        }
+
+        decoded.push_back(
+            static_cast<char>(
+                (high << 4) | low
+            )
+        );
+
+        i += 3U;
+    }
+
+    text = std::move(decoded);
     return true;
 }
 

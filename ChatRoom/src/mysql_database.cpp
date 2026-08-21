@@ -1,8 +1,10 @@
+#include <deque>
 #include "mysql_database.hpp"
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <type_traits>
@@ -54,6 +56,34 @@ public:
 void ensure_mysql_thread() {
     thread_local MySqlThreadGuard guard;
     (void)guard;
+}
+
+thread_local MYSQL*
+    g_active_mysql_connection = nullptr;
+
+class ActiveMysqlConnectionScope {
+public:
+    explicit ActiveMysqlConnectionScope(
+        MYSQL* connection
+    )
+        : previous_(
+              g_active_mysql_connection
+          ) {
+        g_active_mysql_connection =
+            connection;
+    }
+
+    ~ActiveMysqlConnectionScope() {
+        g_active_mysql_connection =
+            previous_;
+    }
+
+private:
+    MYSQL* previous_ = nullptr;
+};
+
+MYSQL* active_mysql_connection() {
+    return g_active_mysql_connection;
 }
 
 class Statement final {
@@ -172,7 +202,7 @@ bool bind_params(
     const std::vector<SqlParam>& params,
     std::vector<MYSQL_BIND>& bindings,
     std::vector<unsigned long>& lengths,
-    std::vector<BindNullFlag>& null_flags,
+    std::deque<BindNullFlag>& null_flags,
     std::string& error
 ) {
     if (statement == nullptr) {
@@ -238,8 +268,8 @@ bool bind_params(
                 binding.length =
                     &lengths[index];
 
-                binding.is_null =
-                    &null_flags[index];
+                binding.is_null = 
+                    reinterpret_cast<bool*>(&null_flags[index]);
                 break;
             }
 
@@ -252,7 +282,7 @@ bool bind_params(
                     );
                 binding.is_unsigned = 1;
                 binding.is_null =
-                    &null_flags[index];
+                    reinterpret_cast<bool*>(&null_flags[index]);
                 break;
 
             case SqlParam::Kind::Signed64:
@@ -264,7 +294,7 @@ bool bind_params(
                     );
                 binding.is_unsigned = 0;
                 binding.is_null =
-                    &null_flags[index];
+                    reinterpret_cast<bool*>(&null_flags[index]);
                 break;
 
             case SqlParam::Kind::Null:
@@ -273,7 +303,7 @@ bool bind_params(
                 binding.buffer_type =
                     MYSQL_TYPE_NULL;
                 binding.is_null =
-                    &null_flags[index];
+                    reinterpret_cast<bool*>(&null_flags[index]);
                 break;
         }
     }
@@ -318,7 +348,7 @@ bool execute_prepared(
 
     std::vector<MYSQL_BIND> bindings;
     std::vector<unsigned long> lengths;
-    std::vector<BindNullFlag> null_flags;
+    std::deque<BindNullFlag> null_flags;
 
     if (!bind_params(
             statement.get(),
@@ -386,7 +416,7 @@ bool query_prepared(
 
     std::vector<MYSQL_BIND> param_bindings;
     std::vector<unsigned long> param_lengths;
-    std::vector<BindNullFlag> param_nulls;
+    std::deque<BindNullFlag> param_nulls;
 
     if (!bind_params(
             statement.get(),
@@ -471,13 +501,13 @@ bool query_prepared(
             0UL
         );
 
-    std::vector<BindNullFlag>
+    std::deque<BindNullFlag>
         result_nulls(
             field_count,
             static_cast<BindNullFlag>(0)
         );
 
-    std::vector<BindNullFlag>
+    std::deque<BindNullFlag>
         result_errors(
             field_count,
             static_cast<BindNullFlag>(0)
@@ -532,10 +562,10 @@ bool query_prepared(
             &result_lengths[index];
 
         binding.is_null =
-            &result_nulls[index];
+            reinterpret_cast<bool*>(&result_nulls[index]);
 
         binding.error =
-            &result_errors[index];
+            reinterpret_cast<bool*>(&result_errors[index]);
     }
 
     if (field_count > 0U &&
@@ -647,16 +677,7 @@ std::uint32_t u32_at(
 
 }  // namespace
 
-MySqlDatabase::~MySqlDatabase() {
-    std::lock_guard<std::mutex> lock(
-        mutex_
-    );
-
-    if (connection_ != nullptr) {
-        mysql_close(connection_);
-        connection_ = nullptr;
-    }
-}
+MySqlDatabase::~MySqlDatabase() = default;
 
 bool MySqlDatabase::connect(
     const MySqlConfig& config,
@@ -664,65 +685,10 @@ bool MySqlDatabase::connect(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    return pool_.initialize(
+        config,
+        error
     );
-
-    if (connection_ != nullptr) {
-        mysql_close(connection_);
-        connection_ = nullptr;
-    }
-
-    connection_ =
-        mysql_init(nullptr);
-
-    if (connection_ == nullptr) {
-        error =
-            "mysql_init failed";
-        return false;
-    }
-
-    mysql_options(
-        connection_,
-        MYSQL_OPT_CONNECT_TIMEOUT,
-        &config.connect_timeout_seconds
-    );
-
-    if (mysql_real_connect(
-            connection_,
-            config.host.c_str(),
-            config.user.c_str(),
-            config.password.c_str(),
-            config.database.c_str(),
-            config.port,
-            nullptr,
-            0
-        ) == nullptr) {
-        error =
-            mysql_error_text(
-                connection_
-            );
-
-        mysql_close(connection_);
-        connection_ = nullptr;
-        return false;
-    }
-
-    if (mysql_set_character_set(
-            connection_,
-            "utf8mb4"
-        ) != 0) {
-        error =
-            mysql_error_text(
-                connection_
-            );
-
-        mysql_close(connection_);
-        connection_ = nullptr;
-        return false;
-    }
-
-    return true;
 }
 
 bool MySqlDatabase::ping(
@@ -730,15 +696,23 @@ bool MySqlDatabase::ping(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
-    if (connection_ == nullptr ||
-        mysql_ping(connection_) != 0) {
+    if (mysql_ping(
+            active_mysql_connection()
+        ) != 0) {
         error =
             mysql_error_text(
-                connection_
+                active_mysql_connection()
             );
         return false;
     }
@@ -746,22 +720,27 @@ bool MySqlDatabase::ping(
     return true;
 }
 
+std::size_t
+MySqlDatabase::pool_size() const noexcept {
+    return pool_.size();
+}
+
 bool MySqlDatabase::begin(
     std::string& error
 ) {
-    if (connection_ == nullptr) {
+    if (active_mysql_connection() == nullptr) {
         error =
             "database is not connected";
         return false;
     }
 
     if (mysql_autocommit(
-            connection_,
+            active_mysql_connection(),
             0
         ) != 0) {
         error =
             mysql_error_text(
-                connection_
+                active_mysql_connection()
             );
         return false;
     }
@@ -772,31 +751,31 @@ bool MySqlDatabase::begin(
 bool MySqlDatabase::commit(
     std::string& error
 ) {
-    if (connection_ == nullptr) {
+    if (active_mysql_connection() == nullptr) {
         error =
             "database is not connected";
         return false;
     }
 
-    if (mysql_commit(connection_) != 0) {
+    if (mysql_commit(active_mysql_connection()) != 0) {
         error =
             mysql_error_text(
-                connection_
+                active_mysql_connection()
             );
         (void)mysql_autocommit(
-            connection_,
+            active_mysql_connection(),
             1
         );
         return false;
     }
 
     if (mysql_autocommit(
-            connection_,
+            active_mysql_connection(),
             1
         ) != 0) {
         error =
             mysql_error_text(
-                connection_
+                active_mysql_connection()
             );
         return false;
     }
@@ -805,16 +784,16 @@ bool MySqlDatabase::commit(
 }
 
 void MySqlDatabase::rollback() {
-    if (connection_ == nullptr) {
+    if (active_mysql_connection() == nullptr) {
         return;
     }
 
     (void)mysql_rollback(
-        connection_
+        active_mysql_connection()
     );
 
     (void)mysql_autocommit(
-        connection_,
+        active_mysql_connection(),
         1
     );
 }
@@ -844,8 +823,15 @@ bool MySqlDatabase::user_exists(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -857,7 +843,7 @@ bool MySqlDatabase::user_exists(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(username)
@@ -880,8 +866,15 @@ bool MySqlDatabase::create_user(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -890,7 +883,7 @@ bool MySqlDatabase::create_user(
         ") VALUES(?,?)";
 
     return execute_prepared(
-        connection_,
+        active_mysql_connection(),
         sql,
         {
             SqlParam::text(username),
@@ -909,8 +902,15 @@ bool MySqlDatabase::get_password_hash(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -922,7 +922,7 @@ bool MySqlDatabase::get_password_hash(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(username)
@@ -951,8 +951,15 @@ bool MySqlDatabase::are_friends(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     const auto pair =
@@ -971,7 +978,7 @@ bool MySqlDatabase::are_friends(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(pair.first),
@@ -997,8 +1004,15 @@ bool MySqlDatabase::is_friend_blocked(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1011,7 +1025,7 @@ bool MySqlDatabase::is_friend_blocked(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(blocker),
@@ -1037,8 +1051,15 @@ bool MySqlDatabase::add_friend_block(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1050,7 +1071,7 @@ bool MySqlDatabase::add_friend_block(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(blocker),
@@ -1077,8 +1098,15 @@ bool MySqlDatabase::remove_friend_block(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1089,7 +1117,7 @@ bool MySqlDatabase::remove_friend_block(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(blocker),
@@ -1115,8 +1143,15 @@ bool MySqlDatabase::list_blocked_friends(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1128,7 +1163,7 @@ bool MySqlDatabase::list_blocked_friends(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(blocker)
@@ -1159,8 +1194,15 @@ bool MySqlDatabase::has_friend_request(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1173,7 +1215,7 @@ bool MySqlDatabase::has_friend_request(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(requester),
@@ -1197,8 +1239,15 @@ bool MySqlDatabase::add_friend_request(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1208,7 +1257,7 @@ bool MySqlDatabase::add_friend_request(
         ") VALUES(?,?)";
 
     return execute_prepared(
-        connection_,
+        active_mysql_connection(),
         sql,
         {
             SqlParam::text(requester),
@@ -1227,8 +1276,15 @@ bool MySqlDatabase::accept_friend_request(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     if (!begin(error)) {
@@ -1244,7 +1300,7 @@ bool MySqlDatabase::accept_friend_request(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             delete_sql,
             {
                 SqlParam::text(requester),
@@ -1277,7 +1333,7 @@ bool MySqlDatabase::accept_friend_request(
             ") VALUES(?,?)";
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             insert_sql,
             {
                 SqlParam::text(pair.first),
@@ -1307,8 +1363,15 @@ bool MySqlDatabase::reject_friend_request(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1319,7 +1382,7 @@ bool MySqlDatabase::reject_friend_request(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(requester),
@@ -1345,8 +1408,15 @@ bool MySqlDatabase::remove_friendship(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     const auto pair =
@@ -1368,7 +1438,7 @@ bool MySqlDatabase::remove_friendship(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             friendship_sql,
             {
                 SqlParam::text(pair.first),
@@ -1407,7 +1477,7 @@ bool MySqlDatabase::remove_friendship(
             "AND blocked_username=?)";
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             block_cleanup_sql,
             {
                 SqlParam::text(left),
@@ -1438,8 +1508,15 @@ bool MySqlDatabase::list_friends(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1455,7 +1532,7 @@ bool MySqlDatabase::list_friends(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(username),
@@ -1487,8 +1564,15 @@ bool MySqlDatabase::list_incoming_requests(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1500,7 +1584,7 @@ bool MySqlDatabase::list_incoming_requests(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(username)
@@ -1530,8 +1614,15 @@ bool MySqlDatabase::list_outgoing_requests(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1543,7 +1634,7 @@ bool MySqlDatabase::list_outgoing_requests(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(username)
@@ -1572,8 +1663,15 @@ bool MySqlDatabase::add_friend_event(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     std::string payload;
@@ -1597,7 +1695,7 @@ bool MySqlDatabase::add_friend_event(
         ") VALUES(?,?,?,?,?)";
 
     return execute_prepared(
-        connection_,
+        active_mysql_connection(),
         sql,
         {
             SqlParam::u64(
@@ -1657,7 +1755,7 @@ bool MySqlDatabase::insert_message_locked(
               );
 
     return execute_prepared(
-        connection_,
+        active_mysql_connection(),
         sql,
         {
             SqlParam::u64(
@@ -1689,8 +1787,15 @@ bool MySqlDatabase::add_message(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     return insert_message_locked(
@@ -1707,8 +1812,15 @@ bool MySqlDatabase::add_private_message_with_delivery(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     if (payload.type() !=
@@ -1743,7 +1855,7 @@ bool MySqlDatabase::add_private_message_with_delivery(
             ") VALUES(?,?,NULL)";
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             delivery_sql,
             {
                 SqlParam::u64(message_id),
@@ -1774,8 +1886,15 @@ bool MySqlDatabase::recent_public_messages(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1788,7 +1907,7 @@ bool MySqlDatabase::recent_public_messages(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::u64(
@@ -1848,8 +1967,15 @@ bool MySqlDatabase::recent_private_messages(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1869,7 +1995,7 @@ bool MySqlDatabase::recent_private_messages(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(user_a),
@@ -1932,8 +2058,15 @@ bool MySqlDatabase::pending_private_messages(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -1955,7 +2088,7 @@ bool MySqlDatabase::pending_private_messages(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(recipient),
@@ -2011,8 +2144,15 @@ bool MySqlDatabase::mark_private_message_delivered(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2023,7 +2163,7 @@ bool MySqlDatabase::mark_private_message_delivered(
         "AND delivered_at_unix_ms IS NULL";
 
     return execute_prepared(
-        connection_,
+        active_mysql_connection(),
         sql,
         {
             SqlParam::i64(
@@ -2056,7 +2196,7 @@ bool MySqlDatabase::group_id_by_name(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name)
@@ -2086,8 +2226,15 @@ bool MySqlDatabase::create_group(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     if (!begin(error)) {
@@ -2101,7 +2248,7 @@ bool MySqlDatabase::create_group(
             ") VALUES(?,?)";
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             group_sql,
             {
                 SqlParam::text(group_name),
@@ -2122,7 +2269,7 @@ bool MySqlDatabase::create_group(
             ") VALUES(?,?,1)";
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             member_sql,
             {
                 SqlParam::u64(group_id),
@@ -2151,8 +2298,15 @@ bool MySqlDatabase::get_group(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2167,7 +2321,7 @@ bool MySqlDatabase::get_group(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name)
@@ -2204,8 +2358,15 @@ bool MySqlDatabase::dissolve_group(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2216,7 +2377,7 @@ bool MySqlDatabase::dissolve_group(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name),
@@ -2242,8 +2403,15 @@ bool MySqlDatabase::get_group_role(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2258,7 +2426,7 @@ bool MySqlDatabase::get_group_role(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name),
@@ -2290,8 +2458,15 @@ bool MySqlDatabase::list_user_groups(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2309,7 +2484,7 @@ bool MySqlDatabase::list_user_groups(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(username)
@@ -2351,8 +2526,15 @@ bool MySqlDatabase::list_group_members(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2370,7 +2552,7 @@ bool MySqlDatabase::list_group_members(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name)
@@ -2408,8 +2590,15 @@ bool MySqlDatabase::list_group_member_usernames(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2423,7 +2612,7 @@ bool MySqlDatabase::list_group_member_usernames(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name)
@@ -2454,8 +2643,15 @@ bool MySqlDatabase::has_group_join_request(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2470,7 +2666,7 @@ bool MySqlDatabase::has_group_join_request(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name),
@@ -2494,8 +2690,15 @@ bool MySqlDatabase::add_group_join_request(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     std::optional<std::uint64_t>
@@ -2521,7 +2724,7 @@ bool MySqlDatabase::add_group_join_request(
         ") VALUES(?,?)";
 
     return execute_prepared(
-        connection_,
+        active_mysql_connection(),
         sql,
         {
             SqlParam::u64(*group_id),
@@ -2540,8 +2743,15 @@ bool MySqlDatabase::list_group_join_requests(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2557,7 +2767,7 @@ bool MySqlDatabase::list_group_join_requests(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name)
@@ -2587,8 +2797,15 @@ bool MySqlDatabase::list_group_managers(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2605,7 +2822,7 @@ bool MySqlDatabase::list_group_managers(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name)
@@ -2635,8 +2852,15 @@ bool MySqlDatabase::list_managed_group_request_counts(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -2659,7 +2883,7 @@ bool MySqlDatabase::list_managed_group_request_counts(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(username)
@@ -2697,8 +2921,15 @@ bool MySqlDatabase::approve_group_join_request(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     std::optional<std::uint64_t>
@@ -2731,7 +2962,7 @@ bool MySqlDatabase::approve_group_join_request(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             delete_sql,
             {
                 SqlParam::u64(*group_id),
@@ -2758,7 +2989,7 @@ bool MySqlDatabase::approve_group_join_request(
             ") VALUES(?,?,3)";
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             insert_sql,
             {
                 SqlParam::u64(*group_id),
@@ -2788,8 +3019,15 @@ bool MySqlDatabase::reject_group_join_request(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     std::optional<std::uint64_t>
@@ -2817,7 +3055,7 @@ bool MySqlDatabase::reject_group_join_request(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::u64(*group_id),
@@ -2844,8 +3082,15 @@ bool MySqlDatabase::set_group_member_role(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     std::optional<std::uint64_t>
@@ -2874,7 +3119,7 @@ bool MySqlDatabase::set_group_member_role(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::u64(
@@ -2905,8 +3150,15 @@ bool MySqlDatabase::remove_group_member(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     std::optional<std::uint64_t>
@@ -2934,7 +3186,7 @@ bool MySqlDatabase::remove_group_member(
     std::uint64_t affected = 0;
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::u64(*group_id),
@@ -2960,8 +3212,15 @@ bool MySqlDatabase::add_group_message(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     if (!begin(error)) {
@@ -2990,7 +3249,7 @@ bool MySqlDatabase::add_group_message(
             ") VALUES(?,?,?,?)";
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             message_sql,
             {
                 SqlParam::u64(
@@ -3026,7 +3285,7 @@ bool MySqlDatabase::add_group_message(
     for (const std::string& recipient :
          recipients) {
         if (!execute_prepared(
-                connection_,
+                active_mysql_connection(),
                 delivery_sql,
                 {
                     SqlParam::u64(
@@ -3061,8 +3320,15 @@ bool MySqlDatabase::recent_group_messages(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -3077,7 +3343,7 @@ bool MySqlDatabase::recent_group_messages(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(group_name),
@@ -3137,8 +3403,15 @@ bool MySqlDatabase::pending_group_messages(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -3154,7 +3427,7 @@ bool MySqlDatabase::pending_group_messages(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(recipient),
@@ -3209,8 +3482,15 @@ bool MySqlDatabase::mark_group_message_delivered(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -3221,7 +3501,7 @@ bool MySqlDatabase::mark_group_message_delivered(
         "AND delivered_at_unix_ms IS NULL";
 
     return execute_prepared(
-        connection_,
+        active_mysql_connection(),
         sql,
         {
             SqlParam::i64(
@@ -3248,8 +3528,15 @@ bool MySqlDatabase::add_file_transfer(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     if (recipients.empty()) {
@@ -3305,7 +3592,7 @@ bool MySqlDatabase::add_file_transfer(
             ") VALUES(?,?,?,?,?,?,?,?,?,?,?)";
 
     if (!execute_prepared(
-            connection_,
+            active_mysql_connection(),
             insert_sql,
             {
                 SqlParam::text(
@@ -3360,7 +3647,7 @@ bool MySqlDatabase::add_file_transfer(
     for (const std::string& recipient_name :
          recipients) {
         if (!execute_prepared(
-                connection_,
+                active_mysql_connection(),
                 delivery_sql,
                 {
                     SqlParam::u64(
@@ -3395,8 +3682,15 @@ bool MySqlDatabase::pending_file_transfers(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -3421,7 +3715,7 @@ bool MySqlDatabase::pending_file_transfers(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::text(recipient),
@@ -3477,8 +3771,15 @@ bool MySqlDatabase::file_transfer_for_recipient(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -3494,7 +3795,7 @@ bool MySqlDatabase::file_transfer_for_recipient(
     Rows rows;
 
     if (!query_prepared(
-            connection_,
+            active_mysql_connection(),
             sql,
             {
                 SqlParam::u64(
@@ -3547,8 +3848,15 @@ bool MySqlDatabase::mark_file_transfer_delivered(
 ) {
     ensure_mysql_thread();
 
-    std::lock_guard<std::mutex> lock(
-        mutex_
+    auto lease =
+        pool_.acquire(error);
+
+    if (!lease) {
+        return false;
+    }
+
+    ActiveMysqlConnectionScope scope(
+        lease.get()
     );
 
     static constexpr const char* sql =
@@ -3559,7 +3867,7 @@ bool MySqlDatabase::mark_file_transfer_delivered(
         "AND delivered_at_unix_ms IS NULL";
 
     return execute_prepared(
-        connection_,
+        active_mysql_connection(),
         sql,
         {
             SqlParam::i64(

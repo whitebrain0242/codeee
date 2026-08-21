@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+#  第一个参数是IP
+CERT_IP="${1:-127.0.0.1}"
+# 第二个参数是输出目录
+OUT_DIR="${2:-config/tls}"
 
-OUT_DIR="${1:-config/tls}"
 mkdir -p "${OUT_DIR}"
 
 CA_KEY="${OUT_DIR}/ca.key"
@@ -30,7 +33,7 @@ openssl req \
   -out "${SERVER_CSR}" \
   -subj "/CN=localhost"
 
-cat > "${EXT_FILE}" <<'EOF'
+cat > "${EXT_FILE}" <<EOF
 subjectAltName=DNS:localhost,IP:127.0.0.1
 extendedKeyUsage=serverAuth
 keyUsage=digitalSignature,keyEncipherment

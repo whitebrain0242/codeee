@@ -1,11 +1,12 @@
 #include "client/client_app.hpp"
-
 #include "client/client_common.hpp"
 #include "client/client_file_transfer.hpp"
 #include "client/client_local_commands.hpp"
 #include "client/client_message_cache.hpp"
 #include "config.hpp"
 #include "protocol.hpp"
+#include <termios.h>
+#include <unistd.h>
 
 #include <poll.h>
 #include <unistd.h>
@@ -17,6 +18,7 @@
 #include <vector>
 
 int ClientApp::run(const ClientAppConfig &config) {
+
   if (!initialize(config)) {
     return 1;
   }
@@ -72,6 +74,14 @@ int ClientApp::run(const ClientAppConfig &config) {
       if (!std::getline(std::cin, line)) {
         break;
       }
+
+      std::cerr << "\n[debug] line size = " << line.size() << '\n';
+
+      for (unsigned char c : line) {
+        std::cerr << static_cast<int>(c) << ' ';
+      }
+
+      std::cerr << "\n";
 
       if (handle_local_command(transport_, line, state_, cache_)) {
         continue;
@@ -193,7 +203,7 @@ bool ClientApp::read_tls_available() {
 
 void ClientApp::consume_complete_lines() {
   while (true) {
-    //正在接收二进制文件数据
+    // 正在接收二进制文件数据
     if (state_.binary_download.remaining_bytes > 0U) {
       if (server_buffer_.empty()) {
         break;
@@ -207,11 +217,11 @@ void ClientApp::consume_complete_lines() {
 
       continue;
     }
-    //查找文本行 用\n分隔
+    // 查找文本行 用\n分隔
     const std::size_t newline = server_buffer_.find('\n');
 
     if (newline == std::string::npos) {
-      break;//没有完整行就等待数据
+      break; // 没有完整行就等待数据
     }
 
     std::string line = server_buffer_.substr(0, newline);

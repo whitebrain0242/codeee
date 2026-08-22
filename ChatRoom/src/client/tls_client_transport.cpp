@@ -27,6 +27,7 @@ bool TlsClientTransport::connect(const std::string &ip, int port,
   shutdown();
 
   if (!tls_context_.initialize(config, error)) {
+    
     return false;
   }
 

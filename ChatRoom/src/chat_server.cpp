@@ -443,9 +443,13 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
   std::string message;
 
   if (!split_first_token(arguments, target, message) ||
-      !is_valid_username(target) || message.empty() ||
-      message.size() > kMaxChatMessage) {
+      !is_valid_username(target) || message.empty() 
+      ) {
     connection->send("[error] usage: MSG <username> <message>\n");
+    return;
+  }
+  if(message.size() > kMaxChatMessage){
+    connection->send("[error] your message toooo long\n");
     return;
   }
 

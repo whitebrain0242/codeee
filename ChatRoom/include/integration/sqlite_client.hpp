@@ -10,15 +10,15 @@
 #include <vector>
 //私聊消息
 struct LocalPrivateMessage {
-    std::uint64_t server_message_id = 0;
-    std::string account_username;
-    std::string peer_username;
-    std::string sender_username;
-    std::string recipient_username;
-    std::string content;
-    std::int64_t received_at_unix_ms = 0;
-    bool outgoing = false;
-    bool offline_delivery = false;
+    std::uint64_t server_message_id = 0;//全局消息ID
+    std::string account_username;//登陆的用户
+    std::string peer_username;//饲料对方
+    std::string sender_username;//发送人
+    std::string recipient_username;//接收人
+    std::string content;//正文
+    std::int64_t received_at_unix_ms = 0;//时间戳
+    bool outgoing = false;//是否是发送方
+    bool offline_delivery = false;//是否是离线消息
 };
 //群聊消息
 struct LocalGroupMessage {
@@ -33,32 +33,32 @@ struct LocalGroupMessage {
 };
 //已完成文件记录
 struct LocalFileTransfer {
-    std::uint64_t server_transfer_id = 0;
+    std::uint64_t server_transfer_id = 0;//全局文件传输ID
     std::string account_username;
-    std::string scope;
-    std::string peer_username;
-    std::string group_name;
+    std::string scope;//区分饲料和群发
+    std::string peer_username;//对方
+    std::string group_name;//对方
     std::string sender_username;
     std::string file_name;
-    std::string local_path;
-    std::uint64_t file_size = 0;
-    std::string sha256_hex;
+    std::string local_path;//保存在本地的完整路径
+    std::uint64_t file_size = 0;//文件大小
+    std::string sha256_hex;//哈希值
     std::int64_t received_at_unix_ms = 0;
-    bool outgoing = false;
+    bool outgoing = false;//是否是发送方 true自己发送的 false是接受的
 };
-//带上传任务
+//待上传任务
 struct LocalPendingUpload {
     std::string transfer_token;
     std::string account_username;
     std::string scope;
     std::string target;
-    std::string source_path;
+    std::string source_path;//要上传的文件在本地的位置
     std::string file_name;
     std::uint64_t file_size = 0;
     std::string sha256_hex;
     std::int64_t created_at_unix_ms = 0;
 };
-//没有下载完成的文件记录
+//没有下载完成的文件
 struct LocalPartialDownload {
     std::uint64_t server_transfer_id = 0;
     std::string account_username;
@@ -66,7 +66,7 @@ struct LocalPartialDownload {
     std::string sender_username;
     std::string group_name;
     std::string file_name;
-    std::string temp_path;
+    std::string temp_path;//下载文件临时存储位置
     std::uint64_t file_size = 0;
     std::string sha256_hex;
 };

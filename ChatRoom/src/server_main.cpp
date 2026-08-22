@@ -23,281 +23,163 @@
 #include <optional>
 #include <string>
 
-int main(int argc, char* argv[]) {
-    int port = 9000;
+int main(int argc, char *argv[]) {
+  int port = 9000;
 
-    std::string mysql_config_path =
-        "config/mysql.conf";
+  std::string mysql_config_path = "config/mysql.conf";
 
-    std::string redis_config_path =
-        "config/redis.conf";
+  std::string redis_config_path = "config/redis.conf";
 
-    std::string tls_config_path =
-        "config/tls_server.conf";
+  std::string tls_config_path = "config/tls_server.conf";
 
-    int worker_threads = 4;
+  int worker_threads = 4;
 
-    std::filesystem::path file_storage_root =
-        "data/server_files";
+  std::filesystem::path file_storage_root = "data/server_files";
 
-    std::filesystem::path log_directory =
-        "logs";
+  std::filesystem::path log_directory = "logs";
 
-    if (argc >= 2 &&
-        !parse_port(argv[1], port)) {
-        std::cerr
-            << "invalid server port\n";
-        return 1;
+  if (argc >= 2 && !parse_port(argv[1], port)) {
+    std::cerr << "invalid server port\n";
+    return 1;
+  }
+
+  if (argc >= 3) {
+    mysql_config_path = argv[2];
+  }
+
+  if (argc >= 4) {
+    redis_config_path = argv[3];
+  }
+
+  if (argc >= 5) {
+    tls_config_path = argv[4];
+  }
+
+  if (argc >= 6) {
+    std::size_t parsed = 0U;
+
+    if (!parse_count(argv[5], 1U, 64U, parsed)) {
+      std::cerr << "worker thread count must be 1-64\n";
+      return 1;
     }
 
-    if (argc >= 3) {
-        mysql_config_path =
-            argv[2];
-    }
+    worker_threads = static_cast<int>(parsed);
+  }
 
-    if (argc >= 4) {
-        redis_config_path =
-            argv[3];
-    }
+  if (argc >= 7) {
+    file_storage_root = argv[6];
+  }
 
-    if (argc >= 5) {
-        tls_config_path =
-            argv[4];
-    }
+  if (argc >= 8) {
+    log_directory = argv[7];
+  }
 
-    if (argc >= 6) {
-        std::size_t parsed = 0U;
+  (void)std::signal(SIGPIPE, SIG_IGN);
 
-        if (!parse_count(
-                argv[5],
-                1U,
-                64U,
-                parsed
-            )) {
-            std::cerr
-                << "worker thread count must be 1-64\n";
-            return 1;
-        }
+  std::string error;
 
-        worker_threads =
-            static_cast<int>(
-                parsed
-            );
-    }
+  if (!initialize_server_logging(log_directory, error)) {
+    std::cerr << error << '\n';
+    return 1;
+  }
 
-    if (argc >= 7) {
-        file_storage_root =
-            argv[6];
-    }
+  spdlog::info("starting chat server bootstrap");
 
-    if (argc >= 8) {
-        log_directory =
-            argv[7];
-    }
+  MySqlConfig mysql_config;
 
-    (void)std::signal(
-        SIGPIPE,
-        SIG_IGN
-    );
+  if (!load_mysql_config(mysql_config_path, mysql_config, error)) {
+    std::cerr << error << '\n';
+    return 1;
+  }
 
-    std::string error;
+  RedisConfig redis_config;
 
-    if (!initialize_server_logging(
-            log_directory,
-            error
-        )) {
-        std::cerr
-            << error
-            << '\n';
-        return 1;
-    }
+  if (!load_redis_config(redis_config_path, redis_config, error)) {
+    std::cerr << error << '\n';
+    return 1;
+  }
 
-    spdlog::info(
-        "starting chat server bootstrap"
-    );
+  TlsServerConfig tls_config;
 
-    MySqlConfig mysql_config;
+  if (!load_tls_server_config(tls_config_path, tls_config, error)) {
+    std::cerr << "TLS server config failed: " << error << '\n';
+    return 1;
+  }
 
-    if (!load_mysql_config(
-            mysql_config_path,
-            mysql_config,
-            error
-        )) {
-        std::cerr
-            << error
-            << '\n';
-        return 1;
-    }
+  auto tls_context = std::make_shared<minimuduo::net::TlsServerContext>();
 
-    RedisConfig redis_config;
+  if (!tls_context->initialize(tls_config, error)) {
+    std::cerr << "TLS server initialization failed: " << error << '\n';
+    return 1;
+  }
 
-    if (!load_redis_config(
-            redis_config_path,
-            redis_config,
-            error
-        )) {
-        std::cerr
-            << error
-            << '\n';
-        return 1;
-    }
+  MySqlDatabase database;
 
-    TlsServerConfig tls_config;
+  if (!database.connect(mysql_config, error)) {
+    std::cerr << "MySQL connection failed: " << error << '\n';
+    return 1;
+  }
 
-    if (!load_tls_server_config(
-            tls_config_path,
-            tls_config,
-            error
-        )) {
-        std::cerr
-            << "TLS server config failed: "
-            << error
-            << '\n';
-        return 1;
-    }
+  if (!database.ping(error)) {
+    spdlog::error("MySQL pool health check failed: {}", error);
+    return 1;
+  }
 
-    auto tls_context =
-        std::make_shared<
-            minimuduo::net::TlsServerContext
-        >();
+  spdlog::info("MySQL pool ready with {} connections", database.pool_size());
 
-    if (!tls_context->initialize(
-            tls_config,
-            error
-        )) {
-        std::cerr
-            << "TLS server initialization failed: "
-            << error
-            << '\n';
-        return 1;
-    }
+  RedisClient redis;
 
-    MySqlDatabase database;
+  if (!redis.connect(redis_config, error) || !redis.ping(error)) {
+    std::cerr << "Redis connection failed: " << error << '\n';
+    return 1;
+  }
 
-    if (!database.connect(
-            mysql_config,
-            error
-        )) {
-        std::cerr
-            << "MySQL connection failed: "
-            << error
-            << '\n';
-        return 1;
-    }
+  sockaddr_in listen_address{};
+  listen_address.sin_family = AF_INET;
+  listen_address.sin_addr.s_addr = htonl(INADDR_ANY);
+  listen_address.sin_port = htons(static_cast<std::uint16_t>(port));
 
-    if (!database.ping(error)) {
-        spdlog::error(
-            "MySQL pool health check failed: {}",
-            error
-        );
-        return 1;
-    }
+  minimuduo::net::EventLoop main_loop;
 
-    spdlog::info(
-        "MySQL pool ready with {} connections",
-        database.pool_size()
-    );
+  std::optional<ChatServer> chat_server;
 
-    RedisClient redis;
+  minimuduo::net::TcpServer tcp_server(&main_loop, listen_address, "chat");
 
-    if (!redis.connect(
-            redis_config,
-            error
-        ) ||
-        !redis.ping(error)) {
-        std::cerr
-            << "Redis connection failed: "
-            << error
-            << '\n';
-        return 1;
-    }
+  tcp_server.setThreadNum(worker_threads);
 
-    sockaddr_in listen_address{};
-    listen_address.sin_family =
-        AF_INET;
-    listen_address.sin_addr.s_addr =
-        htonl(INADDR_ANY);
-    listen_address.sin_port =
-        htons(
-            static_cast<std::uint16_t>(
-                port
-            )
-        );
+  tcp_server.setTlsContext(tls_context);
 
-    minimuduo::net::EventLoop
-        main_loop;
+  const std::string server_instance_id =
+      redis_config.server_name + ":" + std::to_string(port);
 
-    std::optional<ChatServer>
-        chat_server;
+  try {
+    chat_server.emplace(tcp_server, database, redis, server_instance_id,
+                        redis_config.presence_ttl_seconds, file_storage_root);
+  } catch (const std::exception &exception) {
+    std::cerr << "ChatServer initialization failed: " << exception.what()
+              << '\n';
+    return 1;
+  }
 
-    minimuduo::net::TcpServer
-        tcp_server(
-            &main_loop,
-            listen_address,
-            "chat"
-        );
+  tcp_server.start();
 
-    tcp_server.setThreadNum(
-        worker_threads
-    );
+  ServerConsoleInfo console_info;
+  console_info.port = port;
+  console_info.worker_threads = worker_threads;
+  console_info.tls_certificate = tls_config.certificate_file;
+  console_info.server_instance_id = server_instance_id;
+  console_info.file_storage_root = file_storage_root;
+  console_info.log_directory = log_directory;
+  console_info.mysql_pool_size =
+      static_cast<unsigned int>(database.pool_size());
 
-    tcp_server.setTlsContext(
-        tls_context
-    );
+  print_server_console(console_info);
 
-    const std::string server_instance_id =
-        redis_config.server_name +
-        ":" +
-        std::to_string(port);
+  spdlog::info("server ready on port {} with {} worker reactor(s); "
+               "heartbeat=client PING/server PONG; file_payload=raw binary",
+               port, worker_threads);
 
-    try {
-        chat_server.emplace(
-            tcp_server,
-            database,
-            redis,
-            server_instance_id,
-            redis_config.presence_ttl_seconds,
-            file_storage_root
-        );
-    } catch (const std::exception& exception) {
-        std::cerr
-            << "ChatServer initialization failed: "
-            << exception.what()
-            << '\n';
-        return 1;
-    }
+  main_loop.loop();
 
-    tcp_server.start();
-
-    ServerConsoleInfo console_info;
-    console_info.port = port;
-    console_info.worker_threads =
-        worker_threads;
-    console_info.tls_certificate =
-        tls_config.certificate_file;
-    console_info.server_instance_id =
-        server_instance_id;
-    console_info.file_storage_root =
-        file_storage_root;
-    console_info.log_directory =
-        log_directory;
-    console_info.mysql_pool_size =
-        static_cast<unsigned int>(
-            database.pool_size()
-        );
-
-    print_server_console(
-        console_info
-    );
-
-    spdlog::info(
-        "server ready on port {} with {} worker reactor(s); "
-        "heartbeat=client PING/server PONG; file_payload=raw binary",
-        port,
-        worker_threads
-    );
-
-    main_loop.loop();
-
-    return 0;
+  return 0;
 }

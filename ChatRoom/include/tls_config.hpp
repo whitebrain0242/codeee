@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+//配置层,定义TLS配置结构体
 //封装证书，密钥的位置
 struct TlsServerConfig {
     bool enabled = true;

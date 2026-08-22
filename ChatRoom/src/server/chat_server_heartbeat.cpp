@@ -9,56 +9,33 @@
 
 namespace {
 
-bool parse_heartbeat_nonce(
-    const std::string& text,
-    std::uint64_t& value
-) {
-    const std::string cleaned =
-        trim(text);
+bool parse_heartbeat_nonce(const std::string &text, std::uint64_t &value) {
+  const std::string cleaned = trim(text);
 
-    if (cleaned.empty()) {
-        return false;
-    }
+  if (cleaned.empty()) {
+    return false;
+  }
 
-    const char* begin =
-        cleaned.data();
+  const char *begin = cleaned.data();
 
-    const char* end =
-        begin + cleaned.size();
+  const char *end = begin + cleaned.size();
 
-    const auto result =
-        std::from_chars(
-            begin,
-            end,
-            value
-        );
+  const auto result = std::from_chars(begin, end, value);
 
-    return
-        result.ec == std::errc() &&
-        result.ptr == end;
+  return result.ec == std::errc() && result.ptr == end;
 }
 
-}  // namespace
+} // namespace
 
-void ChatServer::handle_ping(
-    const TcpConnectionPtr& connection,
-    const std::string& arguments
-) {
-    std::uint64_t nonce = 0;
+void ChatServer::handle_ping(const TcpConnectionPtr &connection,
+                             const std::string &arguments) {
+  std::uint64_t nonce = 0;
 
-    if (!parse_heartbeat_nonce(
-            arguments,
-            nonce
-        )) {
-        // PING/PONG are protocol-reserved. Invalid heartbeat frames are
-        // ignored instead of exposing them as normal user commands.
-        return;
-    }
+  if (!parse_heartbeat_nonce(arguments, nonce)) {
+    // PING/PONG are protocol-reserved. Invalid heartbeat frames are
+    // ignored instead of exposing them as normal user commands.
+    return;
+  }
 
-    connection->send(
-        "PONG " +
-        std::to_string(nonce) +
-        "\n"
-    );
+  connection->send("PONG " + std::to_string(nonce) + "\n");
 }
-

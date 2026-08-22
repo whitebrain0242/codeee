@@ -142,3 +142,6 @@ Server                       Client
 SSL_accept()     <---->     SSL_connect()
 ```
 
+tls_config.hpp是配置层
+TlsContext是关于SSL的底层API调用封装
+tls_client_transport是传输层,传输加密数据

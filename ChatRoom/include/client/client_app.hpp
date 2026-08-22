@@ -9,48 +9,37 @@
 #include <string>
 
 struct ClientAppConfig {
-    std::string host =
-        "127.0.0.1";
+  std::string host = "127.0.0.1";//IP
 
-    int port = 9000;
+  int port = 9000;//端口
 
-    std::string sqlite_path =
-        "chat_client.db";
+  std::string sqlite_path = "chat_client.db";//本地SQlite保存路径
 
-    std::filesystem::path download_root =
-        "downloads";
+  std::filesystem::path download_root = "downloads";//下载根目录
 
-    std::string tls_config_path =
-        "config/tls_client.conf";
+  std::string tls_config_path = "config/tls_client.conf";//TLS客户端配置文件路径
 };
 
 class ClientApp {
 public:
-    int run(
-        const ClientAppConfig& config
-    );
+  int run(const ClientAppConfig &config);
 
 private:
-    bool initialize(
-        const ClientAppConfig& config
-    );
+  //加载配置和TCP TLS连接
+  bool initialize(const ClientAppConfig &config);
 
-    bool read_tls_available();
+  bool read_tls_available();
 
-    void consume_complete_lines();
+  void consume_complete_lines();
 
-    void process_server_line(
-        const std::string& line
-    );
+  void process_server_line(const std::string &line);
 
-    void remember_login_attempt(
-        const std::string& line
-    );
+  void remember_login_attempt(const std::string &line);
 
-    SqliteClient cache_;
-    TlsClientTransport transport_;
-    ClientHeartbeat heartbeat_;
-    ClientState state_;
+  SqliteClient cache_;//SQlite
+  TlsClientTransport transport_;//TLS网络传输
+  ClientHeartbeat heartbeat_;//心跳管理
+  ClientState state_;//客户端状态
 
-    std::string server_buffer_;
+  std::string server_buffer_;//接收缓冲区
 };

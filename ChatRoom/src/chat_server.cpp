@@ -148,7 +148,7 @@ void ChatServer::on_message(const TcpConnectionPtr &connection,
       if (!session->upload ||
           session->upload->token != session->binary_upload->token) {
         session->binary_upload.reset();
-        connection->send("[error] binary upload state is invalid.\n");
+        connection->send("[error] binary upload state is invalid.maybe uplode task isvanish or the false token\n");
         connection->forceClose();
         return;
       }
@@ -226,7 +226,7 @@ void ChatServer::handle_command(const TcpConnectionPtr &connection,
                                 ClientSession &session,
                                 const Command &command) {
   if (!command_router_.dispatch(connection, session, command)) {
-    connection->send("[error] unknown command. "
+    connection->send("[error] unknown command about the first paremater. \n"
                      "Type HELP to see available commands.\n");
   }
 }
@@ -266,8 +266,6 @@ void ChatServer::send_help(const TcpConnectionPtr &connection) {
                    "  HISTORY_GROUP <group_name> [count]\n"
                    "  PENDING\n"
                    "  QUIT\n"
-                   "[system] PING is a reserved client heartbeat command; "
-                   "server replies PONG.\n"
                    "[system] chat_client local file commands:\n"
                    "  SEND_FILE <username> <path>\n"
                    "  SEND_GROUP_FILE <group_name> <path>\n"
@@ -494,8 +492,7 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
     }
 
     if (decision == DirectMessageDecision::BlockedByRecipient) {
-      connection->send("[error] recipient privacy settings "
-                       "do not accept direct messages from you.\n");
+      connection->send("[error] recipient put you in his blacklist,so you can not send message to he.\n");
       return;
     }
 
@@ -1802,7 +1799,7 @@ void ChatServer::handle_file_begin_private(const TcpConnectionPtr &connection,
 
   if (words.size() != 5U) {
     reject_file_upload(connection, session, token,
-                       "invalid FILE_BEGIN_PRIVATE arguments");
+                       "your parameter is not five");
     return;
   }
 
@@ -1812,13 +1809,46 @@ void ChatServer::handle_file_begin_private(const TcpConnectionPtr &connection,
   std::string filename;
   std::string error;
 
-  if (!fileutil::is_valid_transfer_token(token) || !is_valid_username(target) ||
-      !parse_uint64_value(words[3], file_size) || file_size > kMaxFileSize ||
-      !fileutil::is_valid_sha256_hex(words[4]) ||
-      !fileutil::percent_decode(words[2], filename, error) ||
-      filename.empty() || filename.size() > 255U) {
+  if (!fileutil::is_valid_transfer_token(token) ) {
     reject_file_upload(connection, session, token,
-                       error.empty() ? "invalid private file metadata" : error);
+                       error.empty() ? "the token is fault" : error);
+    return;
+  }
+  if (!is_valid_username(target) ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "the username is fault" : error);
+    return;
+  }
+  if (!parse_uint64_value(words[3], file_size) ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "your file size is not available" : error);
+    return;
+  }
+  if (file_size > kMaxFileSize ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "your file size is too large" : error);
+    return;
+  }
+  if (!fileutil::is_valid_sha256_hex(words[4])) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "your haxi format is fault" : error);
+    return;
+  }
+  if (!fileutil::percent_decode(words[2], filename, error) ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "restore the fileanme is false" : error);
+    return;
+  }
+  if (filename.empty() ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "your file name is empty" : error);
+    return;
+  }
+  
+
+  if (filename.size() > 255U) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "the size of filename is too large" : error);
     return;
   }
 
@@ -1929,7 +1959,7 @@ void ChatServer::handle_file_begin_group(const TcpConnectionPtr &connection,
 
   if (words.size() != 5U) {
     reject_file_upload(connection, session, token,
-                       "invalid FILE_BEGIN_GROUP arguments");
+                       "the count of parameter is not five");
     return;
   }
 
@@ -1939,16 +1969,49 @@ void ChatServer::handle_file_begin_group(const TcpConnectionPtr &connection,
   std::string filename;
   std::string error;
 
-  if (!fileutil::is_valid_transfer_token(token) ||
-      !is_valid_group_name(group_name) ||
-      !parse_uint64_value(words[3], file_size) || file_size > kMaxFileSize ||
-      !fileutil::is_valid_sha256_hex(words[4]) ||
-      !fileutil::percent_decode(words[2], filename, error) ||
-      filename.empty() || filename.size() > 255U) {
+  if (!fileutil::is_valid_transfer_token(token) ) {
     reject_file_upload(connection, session, token,
-                       error.empty() ? "invalid group file metadata" : error);
+                       error.empty() ? "the token is fault" : error);
     return;
   }
+  if (!is_valid_group_name(group_name) ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "the groupname is fault" : error);
+    return;
+  }
+  if (!parse_uint64_value(words[3], file_size) ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "your file size is not +zhengshu" : error);
+    return;
+  }
+  if (file_size > kMaxFileSize ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "your file size is too large" : error);
+    return;
+  }
+  if (!fileutil::is_valid_sha256_hex(words[4])) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "your haxi format is fault" : error);
+    return;
+  }
+  if (!fileutil::percent_decode(words[2], filename, error) ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "restore the fileanme is false" : error);
+    return;
+  }
+  if (filename.empty() ) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "your file name is empty" : error);
+    return;
+  }
+  
+
+  if (filename.size() > 255U) {
+    reject_file_upload(connection, session, token,
+                       error.empty() ? "the size of filename is too large" : error);
+    return;
+  }
+
 
   if (session.upload) {
     reject_file_upload(connection, session, token,
@@ -2064,10 +2127,24 @@ void ChatServer::handle_file_chunk(const TcpConnectionPtr &connection,
 
   const std::string token = words.empty() ? std::string("unknown") : words[0];
 
-  if (words.size() != 3U || !session.upload || session.upload->token != token ||
-      session.binary_upload) {
+  if (words.size() != 3U ) {
     pause_file_upload(connection, session, token,
-                      "invalid or overlapping binary FILE_CHUNK frame");
+                      "your count of parameter is false");
+    return;
+  }
+  if (!session.upload) {
+    pause_file_upload(connection, session, token,
+                      "the  server donot have the client session");
+    return;
+  }
+  if (session.upload->token != token ) {
+    pause_file_upload(connection, session, token,
+                      "the token of client is false");
+    return;
+  }
+  if (session.binary_upload) {
+    pause_file_upload(connection, session, token,
+                      "the previous chunk is not receive completely");
     return;
   }
 

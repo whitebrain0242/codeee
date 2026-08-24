@@ -145,3 +145,11 @@ SSL_accept()     <---->     SSL_connect()
 tls_config.hpp是配置层
 TlsContext是关于SSL的底层API调用封装
 tls_client_transport是传输层,传输加密数据
+
+config/tls_server.conf
+  ├── cert_file = tls/server.crt    # 服务器证书（给客户端验证）
+  ├── key_file = tls/server.key     # 服务器私钥（加密数据）
+  └── ca_file = tls/ca.crt          # CA证书（验证客户端证书）
+
+config/tls_client.conf
+  └── ca_file = tls/ca.crt          # CA证书（验证服务端证书）

@@ -309,6 +309,39 @@ bool RedisClient::unread_counts(const std::string &username,
 
   return true;
 }
+
+bool RedisClient::clear_unread(const std::string &username,
+                               std::string &error) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (!ensure_connected_locked(error)) {
+    return false;
+  }
+
+  const std::string key = unread_key(username);
+
+  ReplyPtr reply(
+      static_cast<redisReply *>(
+          redisCommand(
+              context_,
+              "DEL %b",
+              key.data(),
+              key.size())),
+      freeReplyObject);
+
+  if (!reply || reply->type != REDIS_REPLY_INTEGER) {
+    error = reply_error_text(context_, reply.get());
+
+    if (!reply) {
+      close_locked();
+    }
+
+    return false;
+  }
+
+  return true;
+}
+
 // 建立底层连接
 bool RedisClient::connect_locked(std::string &error) {
   const timeval timeout{

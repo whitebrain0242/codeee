@@ -23,6 +23,11 @@ void ChatServer::configure_command_routes() {
       [this](const TcpConnectionPtr &connection, ClientSession &session,
              const Command &) { handle_logout(connection, session); });
 
+  add_arguments_handler(
+    "DELETE_ACCOUNT",
+    &ChatServer::handle_delete_account);
+
+
   add_arguments_handler("SAY", &ChatServer::handle_public_message);
 
   add_arguments_handler("MSG", &ChatServer::handle_private_message);

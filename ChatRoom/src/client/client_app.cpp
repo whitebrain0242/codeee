@@ -75,14 +75,6 @@ int ClientApp::run(const ClientAppConfig &config) {
         break;
       }
 
-      std::cerr << "\n[debug] line size = " << line.size() << '\n';
-
-      for (unsigned char c : line) {
-        std::cerr << static_cast<int>(c) << ' ';
-      }
-
-      std::cerr << "\n";
-
       if (handle_local_command(transport_, line, state_, cache_)) {
         continue;
       }
@@ -263,12 +255,41 @@ void ClientApp::process_server_line(const std::string &line) {
 
   cache_server_message(line, state_, cache_);
 
-  if (starts_with(line, "[system] logout successful.")) {
+  const bool logged_out = starts_with(line, "[system] logout successful.");
+
+  const bool account_deleted =
+      starts_with(line, "[system] account deleted successfully.");
+
+  // 如果是永久注销账号，删除这个账号对应的 SQLite 缓存
+  if (account_deleted && !state_.active_username.empty()) {
+
+    std::string cache_error;
+
+    if (!cache_.clear_account_data(state_.active_username, cache_error)) {
+
+      std::cout << "[local sqlite warning] "
+                   "account was deleted on the server, "
+                   "but local cache cleanup failed: "
+                << cache_error << '\n';
+    }
+  }
+
+  // LOGOUT 和 DELETE_ACCOUNT 都要清理客户端登录状态
+  if (logged_out || account_deleted) {
+
     state_.active_username.clear();
+
+    state_.pending_login_username.clear();
+
     state_.pending_uploads.clear();
+
     state_.upload_queue.clear();
+
     state_.active_upload_token.clear();
+
     state_.downloads.clear();
+
+    state_.binary_download = {};
   }
 }
 

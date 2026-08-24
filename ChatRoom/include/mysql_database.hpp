@@ -76,6 +76,12 @@ public:
         std::string& error
     );
 
+    bool delete_user(
+        const std::string& username,
+        bool& removed,
+        std::string& error
+    );
+
     bool get_password_hash(
         const std::string& username,
         std::optional<std::string>& password_hash,

@@ -74,6 +74,12 @@ public:
         std::string& error
     );
 
+    bool clear_unread(
+    const std::string& username,
+    std::string& error
+    );
+
+
 private:
     RedisConfig config_;
     redisContext* context_ = nullptr;

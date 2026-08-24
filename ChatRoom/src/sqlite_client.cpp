@@ -778,6 +778,90 @@ bool SqliteClient::remove_partial_download(const std::string &account_username,
   return true;
 }
 
+bool SqliteClient::clear_account_data(
+    const std::string &account_username,
+    std::string &error) {
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (database_ == nullptr) {
+    error = "SQLite database is not open";
+    return false;
+  }
+
+  if (!execute("BEGIN IMMEDIATE TRANSACTION", error)) {
+    return false;
+  }
+
+  const char *tables[] = {
+      "private_messages",
+      "group_messages",
+      "file_transfers",
+      "pending_uploads",
+      "partial_downloads"
+  };
+
+  for (const char *table : tables) {
+    const std::string sql =
+        std::string("DELETE FROM ") +
+        table +
+        " WHERE account_username=?";
+
+    sqlite3_stmt *raw_statement = nullptr;
+
+    if (sqlite3_prepare_v2(
+            database_,
+            sql.c_str(),
+            -1,
+            &raw_statement,
+            nullptr) != SQLITE_OK) {
+
+      error = sqlite_error(database_);
+
+      std::string ignored;
+      (void)execute("ROLLBACK", ignored);
+
+      return false;
+    }
+
+    StatementPtr statement(
+        raw_statement,
+        sqlite3_finalize);
+
+    if (!bind_text(
+            statement.get(),
+            1,
+            account_username)) {
+
+      error = sqlite_error(database_);
+
+      std::string ignored;
+      (void)execute("ROLLBACK", ignored);
+
+      return false;
+    }
+
+    if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+      error = sqlite_error(database_);
+
+      std::string ignored;
+      (void)execute("ROLLBACK", ignored);
+
+      return false;
+    }
+  }
+
+  if (!execute("COMMIT", error)) {
+    std::string ignored;
+    (void)execute("ROLLBACK", ignored);
+
+    return false;
+  }
+
+  return true;
+}
+
+
 bool SqliteClient::stats(const std::string &account_username,
                          LocalCacheStats &stats_value, std::string &error) {
   std::lock_guard<std::mutex> lock(mutex_);

@@ -67,8 +67,6 @@ private:
   DirectMessagePolicy direct_message_policy_;
   ServerCommandRouter command_router_;
 
-  // v7.3 was single-threaded. After moving to SubReactors these compound
-  // check+write business operations need their own serialization boundary.
   std::mutex friend_operation_mutex_;
   std::mutex group_operation_mutex_;
 
@@ -91,6 +89,10 @@ private:
 
   void handle_logout(const TcpConnectionPtr &connection,
                      ClientSession &session);
+
+  void handle_delete_account(const TcpConnectionPtr &connection,
+                             ClientSession &session,
+                             const std::string &arguments);
 
   void handle_public_message(const TcpConnectionPtr &connection,
                              const ClientSession &session,

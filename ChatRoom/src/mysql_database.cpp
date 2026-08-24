@@ -552,6 +552,40 @@ bool MySqlDatabase::create_user(const std::string &username,
       nullptr, error);
 }
 
+bool MySqlDatabase::delete_user(const std::string &username,
+                                bool &removed,
+                                std::string &error) {
+  ensure_mysql_thread();
+
+  auto lease = pool_.acquire(error);
+
+  if (!lease) {
+    return false;
+  }
+
+  ActiveMysqlConnectionScope scope(lease.get());
+
+  static constexpr const char *sql =
+      "DELETE FROM users WHERE username=?";
+
+  std::uint64_t affected = 0U;
+
+  if (!execute_prepared(
+          active_mysql_connection(),
+          sql,
+          {SqlParam::text(username)},
+          nullptr,
+          &affected,
+          error)) {
+    return false;
+  }
+
+  removed = affected == 1U;
+
+  return true;
+}
+
+
 bool MySqlDatabase::get_password_hash(const std::string &username,
                                       std::optional<std::string> &password_hash,
                                       std::string &error) {

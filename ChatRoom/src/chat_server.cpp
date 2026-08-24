@@ -148,7 +148,8 @@ void ChatServer::on_message(const TcpConnectionPtr &connection,
       if (!session->upload ||
           session->upload->token != session->binary_upload->token) {
         session->binary_upload.reset();
-        connection->send("[error] binary upload state is invalid.maybe uplode task isvanish or the false token\n");
+        connection->send("[error] binary upload state is invalid.maybe uplode "
+                         "task isvanish or the false token\n");
         connection->forceClose();
         return;
       }
@@ -236,6 +237,7 @@ void ChatServer::send_help(const TcpConnectionPtr &connection) {
                    "  REGISTER <username> <password>\n"
                    "  LOGIN <username> <password>\n"
                    "  LOGOUT\n"
+                   "  DELETE_ACCOUNT <password> CONFIRM\n"
                    "  SAY <message>\n"
                    "  MSG <username> <message>\n"
                    "  WHO\n"
@@ -397,6 +399,110 @@ void ChatServer::handle_logout(const TcpConnectionPtr &connection,
   broadcast_to_logged_in("[system] " + username + " is offline.\n", connection);
 }
 
+void ChatServer::handle_delete_account(const TcpConnectionPtr &connection,
+                                       ClientSession &session,
+                                       const std::string &arguments) {
+
+  if (!require_login(connection, session, "deleting the account")) {
+    return;
+  }
+
+  const std::vector<std::string> words = split_words(arguments);
+
+  if (words.size() != 2U || words[1] != "CONFIRM") {
+
+    connection->send("[error] usage: "
+                     "DELETE_ACCOUNT <current_password> CONFIRM\n");
+
+    return;
+  }
+
+  if (session.upload || session.binary_upload ||
+      !session.file_deliveries_in_progress.empty()) {
+
+    connection->send("[error] finish or cancel active file transfers "
+                     "before deleting the account.\n");
+
+    return;
+  }
+
+  std::optional<std::string> password_hash;
+  std::string error;
+
+  if (!database_.get_password_hash(session.username, password_hash, error)) {
+
+    database_error(connection, "verifying account deletion", error);
+
+    return;
+  }
+
+
+  if (!password_hash || !verify_password_pbkdf2(words[0], *password_hash)) {
+
+    connection->send("[error] current password is incorrect.\n");
+
+    return;
+  }
+
+  const std::string username = session.username;
+
+  bool removed = false;
+
+  {
+    std::scoped_lock operation_lock(friend_operation_mutex_,
+                                    group_operation_mutex_);
+
+    if (!database_.delete_user(username, removed, error)) {
+
+      database_error(connection, "deleting account", error);
+
+      return;
+    }
+  }
+
+  if (!removed) {
+    connection->send("[error] account no longer exists.\n");
+
+    return;
+  }
+  //MYSQL永久删除
+  // 7. 从本服务器在线用户表移除
+  remove_online_user(username, connection);
+
+  // 8. 删除 Redis presence
+  remove_redis_presence_best_effort(username);
+
+  // 9. 删除 Redis 未读缓存
+  std::string redis_error;
+
+  if (!redis_.clear_unread(username, redis_error)) {
+
+    // Redis 是缓存。
+    // 即使 Redis 清理失败，也不能把已经从 MySQL
+    // 删除的账号“恢复”。
+    spdlog::warn("failed to clear Redis unread cache "
+                 "for deleted account {}: {}",
+                 username, redis_error);
+  }
+
+  // 10. 清理服务器会话
+  session.logged_in = false;
+  session.username.clear();
+
+  session.offered_files.clear();
+  session.file_deliveries_in_progress.clear();
+
+  // 11. 通知当前客户端
+  connection->send("[system] account deleted successfully. "
+                   "You are now logged out.\n");
+
+  // 12. 通知其他在线用户
+  broadcast_to_logged_in("[system] " + username + " is offline.\n", connection);
+
+  // 13. spdlog 记录
+  spdlog::info("account deleted: {}", username);
+}
+
 void ChatServer::handle_public_message(const TcpConnectionPtr &connection,
                                        const ClientSession &session,
                                        const std::string &message) {
@@ -441,12 +547,11 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
   std::string message;
 
   if (!split_first_token(arguments, target, message) ||
-      !is_valid_username(target) || message.empty() 
-      ) {
+      !is_valid_username(target) || message.empty()) {
     connection->send("[error] usage: MSG <username> <message>\n");
     return;
   }
-  if(message.size() > kMaxChatMessage){
+  if (message.size() > kMaxChatMessage) {
     connection->send("[error] your message toooo long\n");
     return;
   }
@@ -492,7 +597,8 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
     }
 
     if (decision == DirectMessageDecision::BlockedByRecipient) {
-      connection->send("[error] recipient put you in his blacklist,so you can not send message to he.\n");
+      connection->send("[error] recipient put you in his blacklist,so you can "
+                       "not send message to he.\n");
       return;
     }
 
@@ -1809,22 +1915,23 @@ void ChatServer::handle_file_begin_private(const TcpConnectionPtr &connection,
   std::string filename;
   std::string error;
 
-  if (!fileutil::is_valid_transfer_token(token) ) {
+  if (!fileutil::is_valid_transfer_token(token)) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "the token is fault" : error);
     return;
   }
-  if (!is_valid_username(target) ) {
+  if (!is_valid_username(target)) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "the username is fault" : error);
     return;
   }
-  if (!parse_uint64_value(words[3], file_size) ) {
+  if (!parse_uint64_value(words[3], file_size)) {
     reject_file_upload(connection, session, token,
-                       error.empty() ? "your file size is not available" : error);
+                       error.empty() ? "your file size is not available"
+                                     : error);
     return;
   }
-  if (file_size > kMaxFileSize ) {
+  if (file_size > kMaxFileSize) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "your file size is too large" : error);
     return;
@@ -1834,21 +1941,21 @@ void ChatServer::handle_file_begin_private(const TcpConnectionPtr &connection,
                        error.empty() ? "your haxi format is fault" : error);
     return;
   }
-  if (!fileutil::percent_decode(words[2], filename, error) ) {
+  if (!fileutil::percent_decode(words[2], filename, error)) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "restore the fileanme is false" : error);
     return;
   }
-  if (filename.empty() ) {
+  if (filename.empty()) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "your file name is empty" : error);
     return;
   }
-  
 
   if (filename.size() > 255U) {
     reject_file_upload(connection, session, token,
-                       error.empty() ? "the size of filename is too large" : error);
+                       error.empty() ? "the size of filename is too large"
+                                     : error);
     return;
   }
 
@@ -1969,22 +2076,23 @@ void ChatServer::handle_file_begin_group(const TcpConnectionPtr &connection,
   std::string filename;
   std::string error;
 
-  if (!fileutil::is_valid_transfer_token(token) ) {
+  if (!fileutil::is_valid_transfer_token(token)) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "the token is fault" : error);
     return;
   }
-  if (!is_valid_group_name(group_name) ) {
+  if (!is_valid_group_name(group_name)) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "the groupname is fault" : error);
     return;
   }
-  if (!parse_uint64_value(words[3], file_size) ) {
+  if (!parse_uint64_value(words[3], file_size)) {
     reject_file_upload(connection, session, token,
-                       error.empty() ? "your file size is not +zhengshu" : error);
+                       error.empty() ? "your file size is not +zhengshu"
+                                     : error);
     return;
   }
-  if (file_size > kMaxFileSize ) {
+  if (file_size > kMaxFileSize) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "your file size is too large" : error);
     return;
@@ -1994,24 +2102,23 @@ void ChatServer::handle_file_begin_group(const TcpConnectionPtr &connection,
                        error.empty() ? "your haxi format is fault" : error);
     return;
   }
-  if (!fileutil::percent_decode(words[2], filename, error) ) {
+  if (!fileutil::percent_decode(words[2], filename, error)) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "restore the fileanme is false" : error);
     return;
   }
-  if (filename.empty() ) {
+  if (filename.empty()) {
     reject_file_upload(connection, session, token,
                        error.empty() ? "your file name is empty" : error);
     return;
   }
-  
 
   if (filename.size() > 255U) {
     reject_file_upload(connection, session, token,
-                       error.empty() ? "the size of filename is too large" : error);
+                       error.empty() ? "the size of filename is too large"
+                                     : error);
     return;
   }
-
 
   if (session.upload) {
     reject_file_upload(connection, session, token,
@@ -2127,7 +2234,7 @@ void ChatServer::handle_file_chunk(const TcpConnectionPtr &connection,
 
   const std::string token = words.empty() ? std::string("unknown") : words[0];
 
-  if (words.size() != 3U ) {
+  if (words.size() != 3U) {
     pause_file_upload(connection, session, token,
                       "your count of parameter is false");
     return;
@@ -2137,7 +2244,7 @@ void ChatServer::handle_file_chunk(const TcpConnectionPtr &connection,
                       "the  server donot have the client session");
     return;
   }
-  if (session.upload->token != token ) {
+  if (session.upload->token != token) {
     pause_file_upload(connection, session, token,
                       "the token of client is false");
     return;

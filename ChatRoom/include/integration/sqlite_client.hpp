@@ -167,6 +167,12 @@ public:
         std::uint64_t transfer_id,
         std::string& error
     );
+
+    bool clear_account_data(
+    const std::string& account_username,
+    std::string& error
+    );
+
     //查看本地存储了多少消息和文件
     bool stats(
         const std::string& account_username,

@@ -47,6 +47,11 @@ struct ClientState {
   std::string active_username;        // 以登陆的用户名
   std::string pending_login_username; // 可能正正在登陆但是没有认证完成
 
+  // 当前聊天会话仅由客户端维护，服务端仍接收原英文命令。
+  enum class ChatScope { None, Private, Group };
+  ChatScope chat_scope = ChatScope::None;
+  std::string chat_target;
+
   std::filesystem::path download_root; // 客户端接受文件的根目录
 
   std::unordered_map<std::string,

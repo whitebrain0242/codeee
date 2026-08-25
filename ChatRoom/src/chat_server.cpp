@@ -1,5 +1,7 @@
 #include "chat_server.hpp"
 
+#include "file_utils.hpp"
+
 #include "password.hpp"
 #include "protocol.hpp"
 
@@ -24,7 +26,7 @@
 #include <utility>
 
 namespace {
-
+//将字符串解析为 uint64_t 无符号整数，供文件大小、偏移量等解析使用
 bool parse_uint64_value(const std::string &text, std::uint64_t &value) {
   if (text.empty()) {
     return false;
@@ -43,13 +45,13 @@ bool parse_uint64_value(const std::string &text, std::uint64_t &value) {
   value = parsed;
   return true;
 }
-
+//对字符串进行百分号编码（URL Encoding），用于在协议报文中安全传输错误原因或文件名
 std::string encode_text_token(const std::string &text) {
   return fileutil::percent_encode(text);
 }
 
 } // namespace
-
+//初始化成员变量（数据库、Redis、文件存储根目录）
 ChatServer::ChatServer(minimuduo::net::TcpServer &tcp_server,
                        MySqlDatabase &database, RedisClient &redis,
                        std::string server_instance_id,
@@ -77,7 +79,7 @@ ChatServer::ChatServer(minimuduo::net::TcpServer &tcp_server,
   configure_command_routes();
   presence_refresh_thread_ = std::thread([this] { presence_refresh_loop(); });
 }
-
+//停止文件传输服务，设置停止标志，唤醒后台线程并等待其结束
 ChatServer::~ChatServer() {
   file_transfer_service_.stop();
 
@@ -94,7 +96,7 @@ ChatServer::~ChatServer() {
     remove_redis_presence_best_effort(username);
   }
 }
-
+//连接事件处理
 void ChatServer::on_connection(const TcpConnectionPtr &connection) {
   if (connection->connected()) {
     connection->setContext(std::make_shared<ClientSession>());
@@ -131,7 +133,7 @@ void ChatServer::on_connection(const TcpConnectionPtr &connection) {
 
   spdlog::info("client disconnected: {}", connection->name());
 }
-
+//消息事件处理
 void ChatServer::on_message(const TcpConnectionPtr &connection,
                             minimuduo::net::Buffer *buffer) {
   const std::shared_ptr<ClientSession> session = session_of(connection);
@@ -222,7 +224,7 @@ void ChatServer::on_message(const TcpConnectionPtr &connection,
     connection->shutdown();
   }
 }
-
+//命令分发器
 void ChatServer::handle_command(const TcpConnectionPtr &connection,
                                 ClientSession &session,
                                 const Command &command) {
@@ -551,6 +553,15 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
     connection->send("[error] usage: MSG <username> <message>\n");
     return;
   }
+
+  std::string decoded_message;
+  std::string decode_error;
+  if (!fileutil::percent_decode(message, decoded_message, decode_error) || decoded_message.empty()) {
+    connection->send("[error] invalid percent-encoded private message.\n");
+    return;
+  }
+  message = std::move(decoded_message);
+
   if (message.size() > kMaxChatMessage) {
     connection->send("[error] your message toooo long\n");
     return;
@@ -1736,10 +1747,22 @@ void ChatServer::handle_group_message(const TcpConnectionPtr &connection,
   std::string message;
 
   if (!split_first_token(arguments, group_name, message) ||
-      !is_valid_group_name(group_name) || message.empty() ||
-      message.size() > kMaxChatMessage) {
+      !is_valid_group_name(group_name) || message.empty()) {
     connection->send("[error] usage: GROUP_MSG <group_name> <message>; "
                      "message must be 1-1000 bytes.\n");
+    return;
+  }
+
+  std::string decoded_message;
+  std::string decode_error;
+  if (!fileutil::percent_decode(message, decoded_message, decode_error) || decoded_message.empty()) {
+    connection->send("[error] invalid percent-encoded group message.\n");
+    return;
+  }
+  message = std::move(decoded_message);
+
+  if (message.size() > kMaxChatMessage) {
+    connection->send("[error] group message must be 1-1000 bytes.\n");
     return;
   }
 

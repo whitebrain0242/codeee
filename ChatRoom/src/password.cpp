@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+//用户密码存储与验证机制
 // 使用 PBKDF2-HMAC-SHA256 算法
 namespace {
 constexpr int kIterations = 210000;

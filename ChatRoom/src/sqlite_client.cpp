@@ -25,7 +25,7 @@ SqliteClient::~SqliteClient() {
   std::lock_guard<std::mutex> lock(mutex_);
   close_locked();
 }
-
+//打开或创建数据库文件，自动创建父目录（如果不存在）。设置超时时间（3秒），调用 initialize_schema 自动建表
 bool SqliteClient::open(const std::string &database_path, std::string &error) {
   std::lock_guard<std::mutex> lock(mutex_);
   close_locked(); // 如果之前打开过，先关掉
@@ -48,7 +48,7 @@ bool SqliteClient::open(const std::string &database_path, std::string &error) {
 
   return initialize_schema(error); // 自动建表
 }
-// 存一条私聊消息
+// 插入/更新一条私聊消息
 bool SqliteClient::cache_private_message(const LocalPrivateMessage &message,
                                          std::string &error) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -112,7 +112,7 @@ bool SqliteClient::cache_private_message(const LocalPrivateMessage &message,
 
   return true;
 }
-
+//插入/更新群聊消息
 bool SqliteClient::cache_group_message(const LocalGroupMessage &message,
                                        std::string &error) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -244,7 +244,7 @@ bool SqliteClient::recent_private_messages(
   std::reverse(messages.begin(), messages.end());
   return true;
 }
-
+//查询某个群组的最近 N 条消息
 bool SqliteClient::recent_group_messages(
     const std::string &account_username, const std::string &group_name,
     std::size_t count, std::vector<LocalGroupMessage> &messages,
@@ -312,7 +312,7 @@ bool SqliteClient::recent_group_messages(
   std::reverse(messages.begin(), messages.end());
   return true;
 }
-
+//存储文件传输元数据
 bool SqliteClient::cache_file_transfer(const LocalFileTransfer &file,
                                        std::string &error) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -379,7 +379,7 @@ bool SqliteClient::cache_file_transfer(const LocalFileTransfer &file,
 
   return true;
 }
-
+//查询当前账号最近的文件传输记录
 bool SqliteClient::recent_file_transfers(const std::string &account_username,
                                          std::size_t count,
                                          std::vector<LocalFileTransfer> &files,
@@ -458,7 +458,7 @@ bool SqliteClient::recent_file_transfers(const std::string &account_username,
 
   return true;
 }
-
+//保存一个待上传的文件任务
 bool SqliteClient::save_pending_upload(const LocalPendingUpload &upload,
                                        std::string &error) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -516,7 +516,7 @@ bool SqliteClient::save_pending_upload(const LocalPendingUpload &upload,
 
   return true;
 }
-
+//列出当前账号所有待上传的文件任务（
 bool SqliteClient::list_pending_uploads(
     const std::string &account_username,
     std::vector<LocalPendingUpload> &uploads, std::string &error) {
@@ -584,7 +584,7 @@ bool SqliteClient::list_pending_uploads(
 
   return true;
 }
-
+//删除指定的待上传任务
 bool SqliteClient::remove_pending_upload(const std::string &account_username,
                                          const std::string &transfer_token,
                                          std::string &error) {
@@ -617,7 +617,7 @@ bool SqliteClient::remove_pending_upload(const std::string &account_username,
 
   return true;
 }
-
+//保存一个正在下载中的文件状态（记录临时文件路径、已下载大小等）。
 bool SqliteClient::save_partial_download(const LocalPartialDownload &download,
                                          std::string &error) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -675,7 +675,7 @@ bool SqliteClient::save_partial_download(const LocalPartialDownload &download,
 
   return true;
 }
-
+//查询某个文件是否正在部分下载中
 bool SqliteClient::get_partial_download(
     const std::string &account_username, std::uint64_t transfer_id,
     std::optional<LocalPartialDownload> &download, std::string &error) {
@@ -742,7 +742,7 @@ bool SqliteClient::get_partial_download(
   download = std::move(item);
   return true;
 }
-
+//删除部分下载记录
 bool SqliteClient::remove_partial_download(const std::string &account_username,
                                            std::uint64_t transfer_id,
                                            std::string &error) {
@@ -777,7 +777,7 @@ bool SqliteClient::remove_partial_download(const std::string &account_username,
 
   return true;
 }
-
+//删除当前账号的所有本地缓存数据
 bool SqliteClient::clear_account_data(
     const std::string &account_username,
     std::string &error) {
@@ -861,7 +861,7 @@ bool SqliteClient::clear_account_data(
   return true;
 }
 
-
+//统计当前账号在本地的数据量：私聊消息数、群聊消息数、文件记录数。用于展示或调试。
 bool SqliteClient::stats(const std::string &account_username,
                          LocalCacheStats &stats_value, std::string &error) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -1033,7 +1033,7 @@ CREATE TABLE IF NOT EXISTS partial_downloads (
 
   return execute(schema, error);
 }
-
+//关闭数据库句柄（内部加锁，由析构或 open 时调用）
 void SqliteClient::close_locked() {
   if (database_ != nullptr) {
     sqlite3_close(database_);

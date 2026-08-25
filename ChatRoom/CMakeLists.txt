@@ -156,6 +156,7 @@ add_executable(
     src/client/client_heartbeat.cpp
     src/client/client_local_commands.cpp
     src/client/client_message_cache.cpp
+    src/client/client_numeric_commands.cpp
     src/client/tls_client_transport.cpp
     src/protocol.cpp
     src/config.cpp

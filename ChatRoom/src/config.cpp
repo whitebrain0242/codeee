@@ -4,7 +4,7 @@
 #include <charconv>
 #include <fstream>
 #include <unordered_map>
-
+//将本地的纯文本配置文件（键值对格式）读取出来，解析成 C++ 结构体（如 MySQL 连接参数、Redis 连接参数、TLS 证书路径），并进行严格的合法性检查。
 namespace {
 // 字符串转无符号整数（端口
 bool parse_unsigned(const std::string &text, unsigned int &value) {

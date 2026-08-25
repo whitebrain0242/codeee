@@ -13,7 +13,7 @@
 #include <utility>
 // 加密、编解码、文件安全操作和随机令牌生成
 namespace fileutil {
-
+//对字符串进行 URL 百分号编码（RFC 3986 非保留字符除外）
 std::string percent_encode(const std::string &text) {
   static constexpr char hex[] = "0123456789ABCDEF";
 
@@ -36,7 +36,7 @@ std::string percent_encode(const std::string &text) {
 
   return encoded;
 }
-
+//解码百分号编码的字符串，还原原始文本
 bool percent_decode(const std::string &encoded, std::string &text,
                     std::string &error) {
   auto hex_value = [](unsigned char ch) -> int {
@@ -84,7 +84,7 @@ bool percent_decode(const std::string &encoded, std::string &text,
   text = std::move(decoded);
   return true;
 }
-
+//计算文件的 SHA-256 摘要，返回十六进制字符串
 bool sha256_file_hex(const std::filesystem::path &path, std::string &hex_digest,
                      std::string &error) {
   std::ifstream input(path, std::ios::binary);
@@ -135,7 +135,7 @@ bool sha256_file_hex(const std::filesystem::path &path, std::string &hex_digest,
   hex_digest = output.str();
   return true;
 }
-
+//生成随机传输令牌（
 std::string make_transfer_token() {
   std::array<unsigned char, 16> bytes{};
   if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1)
@@ -147,7 +147,7 @@ std::string make_transfer_token() {
     output << std::setw(2) << static_cast<unsigned int>(byte);
   return output.str();
 }
-
+//清理文件名，确保安全可用
 std::string sanitize_filename(const std::string &filename) {
   const std::filesystem::path path(filename);
   std::string name = path.filename().string(); // 只取文件名，去掉路径
@@ -169,14 +169,14 @@ std::string sanitize_filename(const std::string &filename) {
 
   return name.empty() ? "file.bin" : name;
 }
-
+//验证传输令牌格式是否合法
 bool is_valid_transfer_token(const std::string &token) {
   if (token.size() != 32U)
     return false;
   return std::all_of(token.begin(), token.end(),
                      [](unsigned char c) { return std::isxdigit(c) != 0; });
 }
-
+//验证 SHA-256 摘要的十六进制表示是否合法
 bool is_valid_sha256_hex(const std::string &value) {
   if (value.size() != 64U)
     return false;

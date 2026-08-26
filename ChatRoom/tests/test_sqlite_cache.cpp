@@ -20,7 +20,7 @@ int main() {
     outgoing.peer_username = "bob";
     outgoing.sender_username = "alice";
     outgoing.recipient_username = "bob";
-    outgoing.content = "hello";
+    outgoing.content = "hello\nsecond line";
     outgoing.received_at_unix_ms = 1000;
     outgoing.outgoing = true;
 
@@ -64,6 +64,7 @@ int main() {
         private_messages.size() != 2U ||
         private_messages[0].server_message_id != 10U ||
         private_messages[1].server_message_id != 11U ||
+        private_messages[0].content != "hello\nsecond line" ||
         !private_messages[1].offline_delivery) {
         std::cerr << "private SQLite history failed: " << error << '\n';
         return EXIT_FAILURE;
@@ -114,6 +115,23 @@ int main() {
         files[0].server_transfer_id != 33U ||
         files[0].file_name != "report.pdf") {
         std::cerr << "file SQLite history failed: " << error << '\n';
+        return EXIT_FAILURE;
+    }
+
+    files.clear();
+    if (!cache.recent_file_transfers_for_chat(
+            "alice", "PRIVATE", "bob", 20, files, error) ||
+        files.size() != 1U ||
+        files[0].server_transfer_id != 33U) {
+        std::cerr << "session file SQLite history failed: " << error << '\n';
+        return EXIT_FAILURE;
+    }
+
+    files.clear();
+    if (!cache.recent_file_transfers_for_chat(
+            "alice", "PRIVATE", "charlie", 20, files, error) ||
+        !files.empty()) {
+        std::cerr << "session file SQLite filter failed: " << error << '\n';
         return EXIT_FAILURE;
     }
 

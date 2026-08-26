@@ -106,6 +106,7 @@ add_library(chat_core
     src/server/chat_server_blocking.cpp
     src/server/chat_server_heartbeat.cpp
     src/server/chat_server_routes.cpp
+    src/server/chat_server_sessions.cpp
     src/server/command_router.cpp
     src/server/direct_message_policy.cpp
     src/server/online_user_registry.cpp
@@ -151,12 +152,13 @@ add_executable(
     chat_client
     src/client.cpp
     src/client/client_app.cpp
+    src/client/client_chat_session.cpp
     src/client/client_common.cpp
+    src/client/client_numeric_commands.cpp
     src/client/client_file_transfer.cpp
     src/client/client_heartbeat.cpp
     src/client/client_local_commands.cpp
     src/client/client_message_cache.cpp
-    src/client/client_numeric_commands.cpp
     src/client/tls_client_transport.cpp
     src/protocol.cpp
     src/config.cpp
@@ -389,6 +391,54 @@ chat_warnings(test_sqlite_cache)
 add_test(
     NAME sqlite_local_cache_and_resume
     COMMAND test_sqlite_cache
+)
+
+add_executable(
+    test_numeric_commands
+    tests/test_numeric_commands.cpp
+    src/client/client_numeric_commands.cpp
+    src/protocol.cpp
+)
+
+target_include_directories(
+    test_numeric_commands
+    PRIVATE
+        include
+)
+
+chat_warnings(test_numeric_commands)
+add_test(
+    NAME client_numeric_commands
+    COMMAND test_numeric_commands
+)
+
+add_executable(
+    test_message_cache_multiline
+    tests/test_message_cache_multiline.cpp
+    src/client/client_message_cache.cpp
+    src/client/client_common.cpp
+    src/file_utils.cpp
+    src/sqlite_client.cpp
+)
+
+target_include_directories(
+    test_message_cache_multiline
+    PRIVATE
+        include
+)
+
+target_link_libraries(
+    test_message_cache_multiline
+    PRIVATE
+        PkgConfig::SQLITE3
+        OpenSSL::SSL
+        OpenSSL::Crypto
+)
+
+chat_warnings(test_message_cache_multiline)
+add_test(
+    NAME client_multiline_message_cache
+    COMMAND test_message_cache_multiline
 )
 
 add_executable(

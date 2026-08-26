@@ -8,7 +8,8 @@ enum class DirectMessageDecision {
     Allowed,
     TargetMissing,
     NotFriends,
-    BlockedByRecipient,
+    BlockedByRecipient,  // 对方屏蔽了你
+    BlockedBySender,     // 你屏蔽了对方（新增）
     DatabaseError
 };
 

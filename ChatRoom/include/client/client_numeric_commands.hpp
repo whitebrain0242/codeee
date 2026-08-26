@@ -1,12 +1,13 @@
 #pragma once
-
 #include <string>
 
-struct NumericCommand {
+struct ParsedNumericCommand {
   int number = 0;
   std::string arguments;
 };
 
-bool parse_numeric_command(const std::string &line, NumericCommand &command);
-bool map_numeric_network_command(int number, std::string &english_name);
+bool parse_numeric_command_line(const std::string &line,
+                                ParsedNumericCommand &command);
+const char *numeric_command_name(int number);
+bool is_known_numeric_command(int number);
 void print_numeric_help();

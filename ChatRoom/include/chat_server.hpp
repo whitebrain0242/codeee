@@ -102,6 +102,15 @@ private:
                               const ClientSession &session,
                               const std::string &arguments);
 
+  // 数字命令 8/9 对应的服务端会话目标校验。
+  void handle_enter_private(const TcpConnectionPtr &connection,
+                            const ClientSession &session,
+                            const std::string &arguments);
+
+  void handle_enter_group(const TcpConnectionPtr &connection,
+                          const ClientSession &session,
+                          const std::string &arguments);
+
   void handle_who(const TcpConnectionPtr &connection,
                   const ClientSession &session);
 

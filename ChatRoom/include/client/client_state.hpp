@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <vector>
 // 客户端发起但是换没有完成的上传请求
 struct PendingUpload {
   std::string token;
@@ -42,15 +43,30 @@ struct PendingBinaryDownloadFrame {
   std::uint64_t remaining_bytes = 0;//还剩多少字节没有接收
 };
 
+// 当前聊天会话类型。只有服务端校验通过后才会进入 Private/Group。
+enum class ClientChatScope {
+  None,
+  Private,
+  Group
+};
+
 // 客户端状态
 struct ClientState {
   std::string active_username;        // 以登陆的用户名
   std::string pending_login_username; // 可能正正在登陆但是没有认证完成
 
-  // 当前聊天会话仅由客户端维护，服务端仍接收原英文命令。
-  enum class ChatScope { None, Private, Group };
-  ChatScope chat_scope = ChatScope::None;
+  // 数字命令 8/9 的会话状态。pending_* 只表示等待服务端校验，
+  // chat_scope/chat_target 只在收到 [chat-enter-ok] 后写入。
+  ClientChatScope chat_scope = ClientChatScope::None;
   std::string chat_target;
+  ClientChatScope pending_chat_scope = ClientChatScope::None;
+  std::string pending_chat_target;
+  bool chat_entry_pending = false;
+
+  // 6/7 进入持续聊天编辑模式后，/send 只发送当前缓冲区并继续编辑；
+  // /quit 才会退出编辑模式并离开当前聊天会话。
+  bool chat_editor_active = false;
+  std::vector<std::string> chat_message_lines;
 
   std::filesystem::path download_root; // 客户端接受文件的根目录
 

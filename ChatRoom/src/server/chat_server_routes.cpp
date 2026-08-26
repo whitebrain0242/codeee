@@ -32,6 +32,9 @@ void ChatServer::configure_command_routes() {
 
   add_arguments_handler("MSG", &ChatServer::handle_private_message);
 
+  add_arguments_handler("ENTER_PRIVATE", &ChatServer::handle_enter_private);
+  add_arguments_handler("ENTER_GROUP", &ChatServer::handle_enter_group);
+
   command_router_.add(
       "WHO", [this](const TcpConnectionPtr &connection, ClientSession &session,
                     const Command &) { handle_who(connection, session); });

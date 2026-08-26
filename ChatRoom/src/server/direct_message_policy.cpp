@@ -24,15 +24,24 @@ DirectMessagePolicy::evaluate(const std::string &sender,
     return DirectMessageDecision::NotFriends;
   }
 
-  bool blocked = false;
+  // 检查对方是否屏蔽了你
+    bool blocked_by_recipient = false;
+    if (!database_.is_friend_blocked(recipient, sender, blocked_by_recipient, error)) {
+        return DirectMessageDecision::DatabaseError;
+    }
+    if (blocked_by_recipient) {
+        return DirectMessageDecision::BlockedByRecipient;
+    }
 
-  if (!database_.is_friend_blocked(recipient, sender, blocked, error)) {
-    return DirectMessageDecision::DatabaseError;
-  }
+    // 检查你是否屏蔽了对方（新增）
+    bool blocked_sender = false;
+    if (!database_.is_friend_blocked(sender, recipient, blocked_sender, error)) {
+        return DirectMessageDecision::DatabaseError;
+    }
+    if (blocked_sender) {
+        return DirectMessageDecision::BlockedBySender;  // 或者新增一个 BlockedBySender
+    }
 
-  if (blocked) {
-    return DirectMessageDecision::BlockedByRecipient;
-  }
 
   return DirectMessageDecision::Allowed;
 }

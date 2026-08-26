@@ -1,9 +1,8 @@
 #include "chat_server.hpp"
 
-#include "file_utils.hpp"
-
 #include "password.hpp"
 #include "protocol.hpp"
+#include "file_utils.hpp"
 
 #include "minimuduo/net/Buffer.hpp"
 #include "minimuduo/net/EventLoop.hpp"
@@ -235,45 +234,51 @@ void ChatServer::handle_command(const TcpConnectionPtr &connection,
 }
 
 void ChatServer::send_help(const TcpConnectionPtr &connection) {
-  connection->send("[system] commands:\n"
-                   "  REGISTER <username> <password>\n"
-                   "  LOGIN <username> <password>\n"
-                   "  LOGOUT\n"
-                   "  DELETE_ACCOUNT <password> CONFIRM\n"
-                   "  SAY <message>\n"
-                   "  MSG <username> <message>\n"
-                   "  WHO\n"
-                   "  ADD_FRIEND <username>\n"
-                   "  ACCEPT_FRIEND <username>\n"
-                   "  REJECT_FRIEND <username>\n"
-                   "  REMOVE_FRIEND <username>\n"
-                   "  BLOCK_FRIEND <username>\n"
-                   "  UNBLOCK_FRIEND <username>\n"
-                   "  BLOCKED_FRIENDS\n"
-                   "  FRIENDS\n"
-                   "  FRIEND_REQUESTS\n"
-                   "  HISTORY_PUBLIC [count]\n"
-                   "  HISTORY_PRIVATE <username> [count]\n"
-                   "  CREATE_GROUP <group_name>\n"
-                   "  DISSOLVE_GROUP <group_name>\n"
-                   "  APPLY_GROUP <group_name>\n"
-                   "  MY_GROUPS\n"
-                   "  LEAVE_GROUP <group_name>\n"
-                   "  GROUP_MEMBERS <group_name>\n"
-                   "  ADD_GROUP_ADMIN <group_name> <username>\n"
-                   "  REMOVE_GROUP_ADMIN <group_name> <username>\n"
-                   "  GROUP_REQUESTS <group_name>\n"
-                   "  APPROVE_GROUP <group_name> <username>\n"
-                   "  REJECT_GROUP <group_name> <username>\n"
-                   "  REMOVE_GROUP_MEMBER <group_name> <username>\n"
-                   "  GROUP_MSG <group_name> <message>\n"
-                   "  HISTORY_GROUP <group_name> [count]\n"
-                   "  PENDING\n"
-                   "  QUIT\n"
-                   "[system] chat_client local file commands:\n"
-                   "  SEND_FILE <username> <path>\n"
-                   "  SEND_GROUP_FILE <group_name> <path>\n"
-                   "  LOCAL_FILES [count]\n");
+  connection->send(
+      "[system] 数字命令列表（服务端命令）:\n"
+      "  1  REGISTER <username> <password>\n"
+      "  2  LOGIN <username> <password>\n"
+      "  3  LOGOUT\n"
+      "  4  DELETE_ACCOUNT <password> CONFIRM\n"
+      "  5  SAY <message>\n"
+      "  6  MSG (进入私聊会话后多行编辑)\n"
+      "  7  GROUP_MSG (进入群聊会话后多行编辑)\n"
+      "  8  ENTER_PRIVATE <username>\n"
+      "  9  ENTER_GROUP <group_name>\n"
+      "  10 LEAVE_CHAT\n"
+      "  11 HISTORY_PRIVATE <username> [count]\n"
+      "  12 HISTORY_GROUP <group_name> [count]\n"
+      "  13 FILES (当前会话文件记录)\n"
+      "  14 SEND_FILE <file_path>\n"
+      "  15 FRIENDS\n"
+      "  16 FRIEND_REQUESTS\n"
+      "  17 ADD_FRIEND <username>\n"
+      "  18 ACCEPT_FRIEND <username>\n"
+      "  19 REJECT_FRIEND <username>\n"
+      "  20 REMOVE_FRIEND <username>\n"
+      "  21 BLOCK_FRIEND <username>\n"
+      "  22 UNBLOCK_FRIEND <username>\n"
+      "  23 BLOCKED_FRIENDS\n"
+      "  24 CREATE_GROUP <group_name>\n"
+      "  25 DISSOLVE_GROUP <group_name>\n"
+      "  26 APPLY_GROUP <group_name>\n"
+      "  27 MY_GROUPS\n"
+      "  28 LEAVE_GROUP <group_name>\n"
+      "  29 GROUP_MEMBERS <group_name>\n"
+      "  30 ADD_GROUP_ADMIN <group_name> <username>\n"
+      "  31 REMOVE_GROUP_ADMIN <group_name> <username>\n"
+      "  32 GROUP_REQUESTS <group_name>\n"
+      "  33 APPROVE_GROUP <group_name> <username>\n"
+      "  34 REJECT_GROUP <group_name> <username>\n"
+      "  35 REMOVE_GROUP_MEMBER <group_name> <username>\n"
+      "  36 WHO\n"
+      "  37 PENDING (拉取离线消息/文件)\n"
+      "  38 此帮助\n"
+      "  39 LOCAL_HELP (本地帮助，含命令详解)\n"
+      "  40 LOCAL_DB (查看本地数据库路径)\n"
+      "  41 HISTORY_PUBLIC [count]\n"
+      "[system] 提示：命令 6 和 7 需在对应会话中直接输入数字触发多行编辑；\n"
+      "  其他命令按格式输入参数。输入 39 查看更详细的本地命令说明。\n");
 }
 
 void ChatServer::handle_register(const TcpConnectionPtr &connection,
@@ -323,7 +328,7 @@ void ChatServer::handle_register(const TcpConnectionPtr &connection,
   }
 
   connection->send("[system] registration successful. "
-                   "Use LOGIN <username> <password>.\n");
+                   "Use command 2: 2 <username> <password>.\n");
 }
 
 void ChatServer::handle_login(const TcpConnectionPtr &connection,
@@ -546,24 +551,23 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
   }
 
   std::string target;
-  std::string message;
+  std::string encoded_message;
 
-  if (!split_first_token(arguments, target, message) ||
-      !is_valid_username(target) || message.empty()) {
-    connection->send("[error] usage: MSG <username> <message>\n");
+  if (!split_first_token(arguments, target, encoded_message) ||
+      !is_valid_username(target) || encoded_message.empty()) {
+    connection->send("[error] usage: MSG <username> <percent-encoded-message>\n");
     return;
   }
 
-  std::string decoded_message;
+  std::string message;
   std::string decode_error;
-  if (!fileutil::percent_decode(message, decoded_message, decode_error) || decoded_message.empty()) {
+  if (!fileutil::percent_decode(encoded_message, message, decode_error)) {
     connection->send("[error] invalid percent-encoded private message.\n");
     return;
   }
-  message = std::move(decoded_message);
 
-  if (message.size() > kMaxChatMessage) {
-    connection->send("[error] your message toooo long\n");
+  if (message.empty() || message.size() > kMaxChatMessage) {
+    connection->send("[error] private message must be 1-1000 bytes after decoding.\n");
     return;
   }
 
@@ -584,8 +588,6 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
   payload.set_created_at_unix_ms(now_unix_ms());
 
   {
-    // BLOCK_FRIEND and direct send must have a deterministic order
-    // across different SubReactors.
     std::lock_guard<std::mutex> operation_lock(friend_operation_mutex_);
 
     const DirectMessageDecision decision =
@@ -608,8 +610,13 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
     }
 
     if (decision == DirectMessageDecision::BlockedByRecipient) {
-      connection->send("[error] recipient put you in his blacklist,so you can "
-                       "not send message to he.\n");
+      connection->send("[error] recipient has blocked you.\n");
+      return;
+    }
+
+    // 新增：检查是否是你屏蔽了对方
+    if (decision == DirectMessageDecision::BlockedBySender) {
+      connection->send("[error] you have blocked this user, please unblock first.\n");
       return;
     }
 
@@ -628,12 +635,8 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
 
   if (!database_.is_friend_blocked(target, sender, blocked_before_live_delivery,
                                    error)) {
-    // The message is already durable at this point. A transient
-    // re-check failure must not make the sender think persistence
-    // failed or cause an accidental duplicate on retry.
     std::cerr << "failed to recheck block before live delivery of #"
               << message_id << ": " << error << '\n';
-
     blocked_before_live_delivery = true;
   }
 
@@ -641,7 +644,7 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
       find_online_user(target, target_connection)) {
     target_connection->send(
         "[#" + std::to_string(message_id) + "] [private from " + sender + "] " +
-            message + "\n",
+            encode_text_token(message) + "\n",
         [this, message_id, target] {
           std::string delivery_error;
           if (!database_.mark_private_message_delivered(
@@ -654,12 +657,12 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
         });
 
     connection->send("[#" + std::to_string(message_id) + "] [private to " +
-                     target + "] " + message + "\n");
+                     target + "] " + encode_text_token(message) + "\n");
     return;
   }
 
   connection->send("[#" + std::to_string(message_id) + "] [private to " +
-                   target + "] " + message +
+                   target + "] " + encode_text_token(message) +
                    "\n"
                    "[system] the message is stored and remains pending "
                    "until the recipient is eligible for direct delivery.\n");
@@ -740,7 +743,7 @@ void ChatServer::handle_add_friend(const TcpConnectionPtr &connection,
     if (reverse_request) {
       connection->send("[error] " + target +
                        " already sent you a request. "
-                       "Use ACCEPT_FRIEND " +
+                       "Use command 18 with this username: 18 " +
                        target + ".\n");
       return;
     }
@@ -764,8 +767,8 @@ void ChatServer::handle_add_friend(const TcpConnectionPtr &connection,
   connection->send("[system] friend request sent to " + target + ".\n");
 
   notify_user_if_online(target, "[system] friend request from " + sender +
-                                    ". Use ACCEPT_FRIEND " + sender +
-                                    " or REJECT_FRIEND " + sender + ".\n");
+                                    ". accept :18 " + sender +
+                                    " or reject :19 " + sender + ".\n");
 }
 
 void ChatServer::handle_accept_friend(const TcpConnectionPtr &connection,
@@ -1228,7 +1231,7 @@ void ChatServer::handle_apply_group(const TcpConnectionPtr &connection,
   notify_group_managers(
       group_name,
       "[system] " + session.username + " applied to join group " + group_name +
-          ". Use APPROVE_GROUP " + group_name + " " + session.username +
+          ". Use command 33: 33 " + group_name + " " + session.username +
           " or REJECT_GROUP " + group_name + " " + session.username + ".\n",
       session.username);
 }
@@ -1294,7 +1297,7 @@ void ChatServer::handle_leave_group(const TcpConnectionPtr &connection,
 
     if (*role == GroupRole::Owner) {
       connection->send("[error] the owner cannot leave directly; "
-                       "use DISSOLVE_GROUP.\n");
+                       "use command 25.\n");
       return;
     }
 
@@ -1676,7 +1679,7 @@ void ChatServer::handle_remove_group_member(const TcpConnectionPtr &connection,
   }
 
   if (target == session.username) {
-    connection->send("[error] use LEAVE_GROUP to leave yourself.\n");
+    connection->send("[error] use command 28 to leave yourself.\n");
     return;
   }
 
@@ -1744,25 +1747,24 @@ void ChatServer::handle_group_message(const TcpConnectionPtr &connection,
   }
 
   std::string group_name;
-  std::string message;
+  std::string encoded_message;
 
-  if (!split_first_token(arguments, group_name, message) ||
-      !is_valid_group_name(group_name) || message.empty()) {
-    connection->send("[error] usage: GROUP_MSG <group_name> <message>; "
-                     "message must be 1-1000 bytes.\n");
+  if (!split_first_token(arguments, group_name, encoded_message) ||
+      !is_valid_group_name(group_name) || encoded_message.empty()) {
+    connection->send("[error] usage: GROUP_MSG <group_name> "
+                     "<percent-encoded-message>.\n");
     return;
   }
 
-  std::string decoded_message;
+  std::string message;
   std::string decode_error;
-  if (!fileutil::percent_decode(message, decoded_message, decode_error) || decoded_message.empty()) {
+  if (!fileutil::percent_decode(encoded_message, message, decode_error)) {
     connection->send("[error] invalid percent-encoded group message.\n");
     return;
   }
-  message = std::move(decoded_message);
 
-  if (message.size() > kMaxChatMessage) {
-    connection->send("[error] group message must be 1-1000 bytes.\n");
+  if (message.empty() || message.size() > kMaxChatMessage) {
+    connection->send("[error] group message must be 1-1000 bytes after decoding.\n");
     return;
   }
 
@@ -1817,7 +1819,8 @@ void ChatServer::handle_group_message(const TcpConnectionPtr &connection,
 
   const std::string wire_text = "[#G" + std::to_string(message_id) +
                                 "] [group " + group_name + "] [" +
-                                session.username + "] " + message + "\n";
+                                session.username + "] " +
+                                encode_text_token(message) + "\n";
 
   connection->send(wire_text);
 
@@ -1995,37 +1998,42 @@ void ChatServer::handle_file_begin_private(const TcpConnectionPtr &connection,
   }
 
   {
-    std::lock_guard<std::mutex> operation_lock(friend_operation_mutex_);
+        std::lock_guard<std::mutex> operation_lock(friend_operation_mutex_);
 
-    const DirectMessageDecision decision =
-        direct_message_policy_.evaluate(session.username, target, error);
+        const DirectMessageDecision decision =
+            direct_message_policy_.evaluate(session.username, target, error);
 
-    if (decision == DirectMessageDecision::DatabaseError) {
-      reject_file_upload(connection, session, token,
-                         "database error while checking "
-                         "direct-file policy");
-      return;
+        if (decision == DirectMessageDecision::DatabaseError) {
+            reject_file_upload(connection, session, token,
+                               "database error while checking direct-file policy");
+            return;
+        }
+
+        if (decision == DirectMessageDecision::TargetMissing) {
+            reject_file_upload(connection, session, token,
+                               "target account does not exist");
+            return;
+        }
+
+        if (decision == DirectMessageDecision::NotFriends) {
+            reject_file_upload(connection, session, token,
+                               "private files are allowed only between friends");
+            return;
+        }
+
+        if (decision == DirectMessageDecision::BlockedByRecipient) {
+            reject_file_upload(connection, session, token,
+                               "recipient has blocked you");
+            return;
+        }
+
+        // 新增
+        if (decision == DirectMessageDecision::BlockedBySender) {
+            reject_file_upload(connection, session, token,
+                               "you have blocked this user, please unblock first");
+            return;
+        }
     }
-
-    if (decision == DirectMessageDecision::TargetMissing) {
-      reject_file_upload(connection, session, token,
-                         "target account does not exist");
-      return;
-    }
-
-    if (decision == DirectMessageDecision::NotFriends) {
-      reject_file_upload(connection, session, token,
-                         "private files are allowed only between friends");
-      return;
-    }
-
-    if (decision == DirectMessageDecision::BlockedByRecipient) {
-      reject_file_upload(connection, session, token,
-                         "recipient privacy settings do not accept "
-                         "direct files from you");
-      return;
-    }
-  }
 
   FileUploadResumeState requested;
 
@@ -2338,29 +2346,26 @@ void ChatServer::handle_file_end(const TcpConnectionPtr &connection,
         direct_message_policy_.evaluate(session.username, upload.target, error);
 
     if (decision != DirectMessageDecision::Allowed) {
-      file_transfer_service_.cancel_upload(upload.token);
+        file_transfer_service_.cancel_upload(upload.token);
 
-      std::string reason = "private-file permission changed "
-                           "during upload";
+        std::string reason;
+        if (decision == DirectMessageDecision::BlockedByRecipient) {
+            reason = "recipient has blocked you";
+        } else if (decision == DirectMessageDecision::BlockedBySender) {    // 新增
+            reason = "you have blocked the recipient";
+        } else if (decision == DirectMessageDecision::NotFriends) {
+            reason = "recipient is no longer your friend";
+        } else if (decision == DirectMessageDecision::TargetMissing) {
+            reason = "recipient account no longer exists";
+        } else {
+            reason = "permission changed during upload";
+        }
 
-      if (decision == DirectMessageDecision::BlockedByRecipient) {
-        reason = "recipient privacy settings now block "
-                 "direct files from you";
-      } else if (decision == DirectMessageDecision::NotFriends) {
-        reason = "recipient is no longer your friend";
-      } else if (decision == DirectMessageDecision::TargetMissing) {
-        reason = "recipient account no longer exists";
-      } else if (decision == DirectMessageDecision::DatabaseError) {
-        reason = "database error while rechecking "
-                 "private-file permission";
-      }
-
-      connection->send("FILE_REJECT " + token + " " +
-                       encode_text_token(reason) + "\n");
-
-      return;
+        connection->send("FILE_REJECT " + token + " " +
+                         encode_text_token(reason) + "\n");
+        return;
     }
-  }
+}
 
   if (!file_transfer_service_.finalize_upload(
           upload.temp_path, upload.token, upload.file_name,
@@ -2476,7 +2481,7 @@ void ChatServer::handle_file_resume_request(const TcpConnectionPtr &connection,
 
   if (offered == session.offered_files.end()) {
     connection->send("[error] file #F" + std::to_string(transfer_id) +
-                     " is not currently offered; use PENDING.\n");
+                     " is not currently offered; use command 37.\n");
     return;
   }
 
@@ -2606,7 +2611,7 @@ void ChatServer::handle_file_receive_failed(const TcpConnectionPtr &connection,
   session.file_deliveries_in_progress.erase(transfer_id);
 
   connection->send("[system] file #F" + std::to_string(transfer_id) +
-                   " remains pending; use PENDING to retry/resume.\n");
+                   " remains pending; use command 37 to retry/resume.\n");
 }
 
 void ChatServer::deliver_pending_files(const TcpConnectionPtr &connection,
@@ -2634,7 +2639,7 @@ void ChatServer::deliver_pending_files(const TcpConnectionPtr &connection,
 
   if (transfers.size() == kOfflineFileDeliveryBatch) {
     connection->send("[system] more pending files may remain; "
-                     "use PENDING again after current downloads finish.\n");
+                     "use command 37 again after current downloads finish.\n");
   }
 }
 
@@ -2833,7 +2838,7 @@ void ChatServer::notify_pending_requests(const TcpConnectionPtr &connection,
       connection->send("[system] you have " +
                        std::to_string(pending_friends.size()) +
                        " pending friend request(s). "
-                       "Use FRIEND_REQUESTS.\n");
+                       "Use command 16.\n");
     }
   } else {
     std::cerr << "failed to load pending friend requests for " << username
@@ -2848,7 +2853,7 @@ void ChatServer::notify_pending_requests(const TcpConnectionPtr &connection,
       connection->send("[system] group " + request.group_name + " has " +
                        std::to_string(request.pending_count) +
                        " pending join request(s). "
-                       "Use GROUP_REQUESTS " +
+                       "Use command 32 for group requests: 32 " +
                        request.group_name + ".\n");
     }
   } else {
@@ -2893,7 +2898,7 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
       connection->send(
           "[offline #" + std::to_string(message.id) + "] [private from " +
               message.payload.sender_username() + "] " +
-              message.payload.content() + "\n",
+              encode_text_token(message.payload.content()) + "\n",
           [this, message_id = message.id, username] {
             std::string mark_error;
             if (!database_.mark_private_message_delivered(
@@ -2908,7 +2913,7 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
 
     if (private_messages.size() == kOfflineDeliveryBatch) {
       connection->send("[system] more offline private messages may remain; "
-                       "use PENDING again.\n");
+                       "use command 37 again.\n");
     }
   }
 
@@ -2932,7 +2937,7 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
         "[offline #G" + std::to_string(message.id) + "] [group " +
             message.payload.group_name() + "] [" +
             message.payload.sender_username() + "] " +
-            message.payload.content() + "\n",
+            encode_text_token(message.payload.content()) + "\n",
         [this, message_id = message.id, username] {
           std::string mark_error;
           if (!database_.mark_group_message_delivered(
@@ -2947,7 +2952,7 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
 
   if (group_messages.size() == kOfflineDeliveryBatch) {
     connection->send("[system] more offline group messages may remain; "
-                     "use PENDING again.\n");
+                     "use command 37 again.\n");
   }
 }
 

@@ -34,11 +34,10 @@ private:
 
   void process_server_line(const std::string &line);
 
-  void remember_login_attempt(const std::string &line);
+  // 正常模式只接受数字编号；持续聊天模式只解释 /send 和 /quit。
+  bool handle_user_input(const std::string &line);
 
-  // 6/7 进入后持续发送多条消息；/send 只结束当前消息，/quit 才退出会话。
-  bool run_chat_editor();
-  bool send_network_line(const std::string &line);
+  void remember_login_attempt(const std::string &line);
 
   SqliteClient cache_;//SQlite
   TlsClientTransport transport_;//TLS网络传输

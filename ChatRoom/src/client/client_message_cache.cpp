@@ -73,7 +73,14 @@ bool parse_private_message_line(const std::string &line,
 
   message.received_at_unix_ms = client_now_unix_ms();
 
-  message.content = line.substr(name_end + 2U);
+  {
+    const std::string encoded_content = line.substr(name_end + 2U);
+    std::string decode_error;
+    if (!decode_text_token(encoded_content, message.content, decode_error)) {
+      // 兼容旧服务端的未编码单行消息；新多行消息统一 percent-encoded。
+      message.content = encoded_content;
+    }
+  }
 
   if (outgoing) {
     message.sender_username = active_username;
@@ -148,7 +155,13 @@ bool parse_group_message_line(const std::string &line,
   message.sender_username =
       line.substr(sender_begin, sender_end - sender_begin);
 
-  message.content = line.substr(sender_end + 2U);
+  {
+    const std::string encoded_content = line.substr(sender_end + 2U);
+    std::string decode_error;
+    if (!decode_text_token(encoded_content, message.content, decode_error)) {
+      message.content = encoded_content;
+    }
+  }
 
   message.received_at_unix_ms = client_now_unix_ms();
 
@@ -185,4 +198,31 @@ void cache_server_message(const std::string &line, const ClientState &state,
       std::cerr << "[local sqlite error] " << error << '\n';
     }
   }
+}
+
+
+bool display_chat_message_line(const std::string &line,
+                               const ClientState &state) {
+  if (state.active_username.empty()) return false;
+
+  LocalPrivateMessage private_message;
+  if (parse_private_message_line(line, state.active_username, private_message)) {
+    std::cout << (private_message.offline_delivery ? "[offline #" : "[#")
+              << private_message.server_message_id << "] [private "
+              << (private_message.outgoing ? "to " : "from ")
+              << private_message.peer_username << "] "
+              << private_message.content << '\n';
+    return true;
+  }
+
+  LocalGroupMessage group_message;
+  if (parse_group_message_line(line, state.active_username, group_message)) {
+    std::cout << (group_message.offline_delivery ? "[offline #G" : "[#G")
+              << group_message.server_message_id << "] [group "
+              << group_message.group_name << "] ["
+              << group_message.sender_username << "] "
+              << group_message.content << '\n';
+    return true;
+  }
+  return false;
 }

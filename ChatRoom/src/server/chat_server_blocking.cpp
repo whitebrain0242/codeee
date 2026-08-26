@@ -93,7 +93,7 @@ void ChatServer::handle_unblock_friend(const TcpConnectionPtr &connection,
   }
 
   connection->send("[system] unblocked direct messages/files from " + target +
-                   ". Use PENDING to immediately retry "
+                   ". Use command 37 to immediately retry "
                    "stored offline deliveries.\n");
 }
 

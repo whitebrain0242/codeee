@@ -23,3 +23,8 @@ void cache_server_message(
     SqliteClient& cache
 );
 
+bool display_chat_message_line(
+    const std::string& line,
+    const ClientState& state
+);
+

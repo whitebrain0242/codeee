@@ -727,7 +727,7 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
 
       std::cout << "[file paused] " << reason << "\n"
                 << "[resume] task remains in SQLite; "
-                   "use RESUME_UPLOADS or reconnect/login.\n";
+                   "reconnect/login to resume the saved upload task.\n";
     }
 
     return true;

@@ -130,6 +130,16 @@ public:
         std::vector<LocalFileTransfer>& files,
         std::string& error
     );
+
+    // 只查询当前私聊/群聊目标相关的文件记录，供数字命令 13 使用。
+    bool recent_file_transfers_for_chat(
+        const std::string& account_username,
+        const std::string& scope,
+        const std::string& target,
+        std::size_t count,
+        std::vector<LocalFileTransfer>& files,
+        std::string& error
+    );
     //断点续传-上传
     //存任务
     bool save_pending_upload(

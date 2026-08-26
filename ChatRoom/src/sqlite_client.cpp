@@ -458,6 +458,82 @@ bool SqliteClient::recent_file_transfers(const std::string &account_username,
 
   return true;
 }
+//查询当前会话对象相关的最近 N 条文件传输记录
+bool SqliteClient::recent_file_transfers_for_chat(
+    const std::string &account_username, const std::string &scope,
+    const std::string &target, std::size_t count,
+    std::vector<LocalFileTransfer> &files, std::string &error) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  const char *sql = nullptr;
+  if (scope == "PRIVATE") {
+    sql =
+        "SELECT server_transfer_id,scope,peer_username,"
+        "group_name,sender_username,file_name,local_path,"
+        "file_size,sha256_hex,received_at_unix_ms,outgoing "
+        "FROM file_transfers "
+        "WHERE account_username=? AND scope='PRIVATE' AND peer_username=? "
+        "ORDER BY server_transfer_id DESC LIMIT ?";
+  } else if (scope == "GROUP") {
+    sql =
+        "SELECT server_transfer_id,scope,peer_username,"
+        "group_name,sender_username,file_name,local_path,"
+        "file_size,sha256_hex,received_at_unix_ms,outgoing "
+        "FROM file_transfers "
+        "WHERE account_username=? AND scope='GROUP' AND group_name=? "
+        "ORDER BY server_transfer_id DESC LIMIT ?";
+  } else {
+    error = "invalid chat scope for file history";
+    return false;
+  }
+
+  sqlite3_stmt *raw_statement = nullptr;
+  if (sqlite3_prepare_v2(database_, sql, -1, &raw_statement, nullptr) != SQLITE_OK) {
+    error = sqlite_error(database_);
+    return false;
+  }
+
+  StatementPtr statement(raw_statement, sqlite3_finalize);
+  if (!bind_text(statement.get(), 1, account_username) ||
+      !bind_text(statement.get(), 2, target) ||
+      sqlite3_bind_int64(statement.get(), 3,
+                         static_cast<sqlite3_int64>(count)) != SQLITE_OK) {
+    error = sqlite_error(database_);
+    return false;
+  }
+
+  files.clear();
+  while (true) {
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) {
+      error = sqlite_error(database_);
+      return false;
+    }
+
+    LocalFileTransfer file;
+    file.server_transfer_id =
+        static_cast<std::uint64_t>(sqlite3_column_int64(statement.get(), 0));
+    file.account_username = account_username;
+    file.scope = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 1));
+    file.peer_username = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 2));
+    file.group_name = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 3));
+    file.sender_username = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 4));
+    file.file_name = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 5));
+    file.local_path = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 6));
+    file.file_size =
+        static_cast<std::uint64_t>(sqlite3_column_int64(statement.get(), 7));
+    file.sha256_hex = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 8));
+    file.received_at_unix_ms =
+        static_cast<std::int64_t>(sqlite3_column_int64(statement.get(), 9));
+    file.outgoing = sqlite3_column_int(statement.get(), 10) != 0;
+    files.push_back(std::move(file));
+  }
+
+  std::reverse(files.begin(), files.end());
+  return true;
+}
+
 //保存一个待上传的文件任务
 bool SqliteClient::save_pending_upload(const LocalPendingUpload &upload,
                                        std::string &error) {

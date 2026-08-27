@@ -15,7 +15,7 @@ bool setIntOption(int socketFd,
                   const char *name, // 参数的名字
                   std::string &error) {
   if (::setsockopt(socketFd, level, option, &value, sizeof(value)) != 0) {
-    error = std::string(name) + " failed: " + std::strerror(errno);
+    error = std::string(name) + " 设置失败：" + std::strerror(errno);
     return false;
   }
   return true;
@@ -45,4 +45,9 @@ bool configureTcpKeepAlive(int socketFd,
 
   return true;
 }
+bool configureTcpNoDelay(int socketFd, bool enabled, std::string &error) {
+  return setIntOption(socketFd, IPPROTO_TCP, TCP_NODELAY, enabled ? 1 : 0,
+                      "TCP_NODELAY", error);
+}
+
 } // namespace minimuduo::net

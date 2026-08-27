@@ -20,6 +20,8 @@ class FileTransferService {
 public:
   // 回调函数1.表示成功或者失败2. 失败时具体的错误描述
   using CompletionCallback = std::function<void(bool, const std::string &)>;
+  // 每个二进制帧发送前检查一次。群成员被移出等权限变化后可立即停止后续帧。
+  using ContinueCallback = std::function<bool()>;
   // 初始化存储根目录,启动指定数量的后台工作线程
   // 1. 服务端磁盘位置也就是存文件的位置2. 线程池大小,默认为2
   explicit FileTransferService(std::filesystem::path storage_root,
@@ -71,6 +73,7 @@ public:
       const FileTransferMetadata &metadata,               // 元数据
       std::uint64_t start_offset,                         // 服务器偏移量
       const minimuduo::net::TcpConnectionPtr &connection, // 目标客户端
+      ContinueCallback can_continue,
       CompletionCallback
           completion // 一个回调对象---当文件传输完成,利用这个回调会通知上层业务
   );
@@ -108,6 +111,7 @@ private:
                     FileTransferMetadata metadata, // 元数据
                     std::uint64_t start_offset,    // 服务器数据偏移量
                     minimuduo::net::TcpConnectionPtr connection, // 目标客户端
+                    ContinueCallback can_continue,
                     CompletionCallback completion // 完成回调的时候,通知上层
   );
 

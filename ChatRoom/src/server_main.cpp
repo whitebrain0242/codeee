@@ -39,7 +39,7 @@ int main(int argc, char *argv[]) {
   std::filesystem::path log_directory = "logs";
 
   if (argc >= 2 && !parse_port(argv[1], port)) {
-    std::cerr << "invalid server port\n";
+    std::cerr << "服务端端口号无效\n";
     return 1;
   }
 
@@ -59,7 +59,7 @@ int main(int argc, char *argv[]) {
     std::size_t parsed = 0U;
 
     if (!parse_count(argv[5], 1U, 64U, parsed)) {
-      std::cerr << "worker thread count must be 1-64\n";
+      std::cerr << "工作线程数必须在 1-64 之间\n";
       return 1;
     }
 
@@ -83,7 +83,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  spdlog::info("starting chat server bootstrap");
+  spdlog::info("正在启动聊天室服务");
 
   MySqlConfig mysql_config;
 
@@ -102,35 +102,35 @@ int main(int argc, char *argv[]) {
   TlsServerConfig tls_config;
 
   if (!load_tls_server_config(tls_config_path, tls_config, error)) {
-    std::cerr << "TLS server config failed: " << error << '\n';
+    std::cerr << "TLS 服务端配置加载失败：" << error << '\n';
     return 1;
   }
 
   auto tls_context = std::make_shared<minimuduo::net::TlsServerContext>();
 
   if (!tls_context->initialize(tls_config, error)) {
-    std::cerr << "TLS server initialization failed: " << error << '\n';
+    std::cerr << "TLS 服务端初始化失败：" << error << '\n';
     return 1;
   }
 
   MySqlDatabase database;
 
   if (!database.connect(mysql_config, error)) {
-    std::cerr << "MySQL connection failed: " << error << '\n';
+    std::cerr << "MySQL 连接失败：" << error << '\n';
     return 1;
   }
 
   if (!database.ping(error)) {
-    spdlog::error("MySQL pool health check failed: {}", error);
+    spdlog::error("MySQL 连接池健康检查失败：{}", error);
     return 1;
   }
 
-  spdlog::info("MySQL pool ready with {} connections", database.pool_size());
+  spdlog::info("MySQL 连接池已就绪，共 {} 个连接", database.pool_size());
 
   RedisClient redis;
 
   if (!redis.connect(redis_config, error) || !redis.ping(error)) {
-    std::cerr << "Redis connection failed: " << error << '\n';
+    std::cerr << "Redis 连接失败：" << error << '\n';
     return 1;
   }
 
@@ -156,7 +156,7 @@ int main(int argc, char *argv[]) {
     chat_server.emplace(tcp_server, database, redis, server_instance_id,
                         redis_config.presence_ttl_seconds, file_storage_root);
   } catch (const std::exception &exception) {
-    std::cerr << "ChatServer initialization failed: " << exception.what()
+    std::cerr << "聊天室服务初始化失败：" << exception.what()
               << '\n';
     return 1;
   }
@@ -175,7 +175,7 @@ int main(int argc, char *argv[]) {
 
   print_server_console(console_info);
 
-  spdlog::info("server ready on port {} with {} worker reactor(s); "
+  spdlog::info("服务端已就绪，端口 {}，工作 Reactor 数量 {}；"
                "heartbeat=client PING/server PONG; file_payload=raw binary",
                port, worker_threads);
 

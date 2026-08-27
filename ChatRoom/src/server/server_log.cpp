@@ -17,7 +17,7 @@ bool initialize_server_logging(const std::filesystem::path &log_directory,
     std::filesystem::create_directories(log_directory, filesystem_error);
 
     if (filesystem_error) {
-      error = "cannot create log directory: " + filesystem_error.message();
+      error = "无法创建日志目录：" + filesystem_error.message();
       return false;
     }
 
@@ -45,7 +45,7 @@ bool initialize_server_logging(const std::filesystem::path &log_directory,
 
     return true;
   } catch (const std::exception &exception) {
-    error = "spdlog initialization failed: " + std::string(exception.what());
+    error = "spdlog 初始化失败：" + std::string(exception.what());
     return false;
   }
 }

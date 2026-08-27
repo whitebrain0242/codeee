@@ -4,7 +4,9 @@
 #include "proto_types.hpp"
 
 #include <cstdint>
+#include <atomic>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -36,8 +38,12 @@ struct IncomingFileUpload {
 
 struct PendingBinaryUploadFrame {
     std::string token;
+    std::uint64_t start_offset = 0;
     std::uint64_t next_offset = 0;
     std::uint64_t remaining_bytes = 0;
+    // 网络层可能每次只给几 KB；先聚合成完整 16 MiB 帧再一次落盘，
+    // 避免每个小 Buffer 都 stat + open + append。
+    std::vector<char> bytes;
 };
 
 
@@ -45,6 +51,16 @@ struct PendingBinaryUploadFrame {
 struct ClientSession {
     bool logged_in = false;
     std::string username;//登陆的账号
+
+    // 进入 8/9 会话时缓存已验证的实时聊天状态。
+    // 服务端用全局 generation 失效，好友关系/屏蔽/群成员变化后自动重查数据库。
+    std::string realtime_private_target;
+    std::uint64_t realtime_private_generation = 0U;
+
+    std::string realtime_group_name;
+    std::uint64_t realtime_group_id = 0U;
+    std::vector<std::string> realtime_group_recipients;
+    std::uint64_t realtime_group_generation = 0U;
     //当前正在进行的上传任务
     std::optional<IncomingFileUpload>upload;
 
@@ -53,4 +69,9 @@ struct ClientSession {
     std::unordered_set<std::uint64_t>file_deliveries_in_progress;
     //已接收并存储、准备供此用户下载的离线文件列表。
     std::unordered_map<std::uint64_t,StoredFileTransfer> offered_files;
+
+    // 正在下载的文件每个都有一个轻量取消标记。群成员被移出后，
+    // 服务端把标记置为 true，文件发送泵会在下一个二进制帧前停止。
+    std::unordered_map<std::uint64_t, std::shared_ptr<std::atomic_bool>>
+        file_delivery_cancel_flags;
 };

@@ -77,6 +77,7 @@ ChatServer::ChatServer(minimuduo::net::TcpServer &tcp_server,
 
   configure_command_routes();
   presence_refresh_thread_ = std::thread([this] { presence_refresh_loop(); });
+  delivery_persist_thread_ = std::thread([this] { delivery_persist_loop(); });
 }
 //停止文件传输服务，设置停止标志，唤醒后台线程并等待其结束
 ChatServer::~ChatServer() {
@@ -84,9 +85,13 @@ ChatServer::~ChatServer() {
 
   stopping_.store(true);
   presence_wait_cv_.notify_all();
+  delivery_persist_cv_.notify_all();
 
   if (presence_refresh_thread_.joinable()) {
     presence_refresh_thread_.join();
+  }
+  if (delivery_persist_thread_.joinable()) {
+    delivery_persist_thread_.join();
   }
 
   const std::vector<std::string> usernames = online_users_.usernames();
@@ -100,16 +105,14 @@ void ChatServer::on_connection(const TcpConnectionPtr &connection) {
   if (connection->connected()) {
     connection->setContext(std::make_shared<ClientSession>());
 
-    std::cout << "client connected: " << connection->name() << " from "
+    std::cout << "客户端已连接：" << connection->name() << "，来源："
               << connection->peerAddressText() << '\n';
 
-    spdlog::info("client connected: {} from {}", connection->name(),
+    spdlog::info("客户端已连接：{}，来源：{}", connection->name(),
                  connection->peerAddressText());
 
-    connection->send("[system] connected to chatroom v8.4 "
-                     "(Reactor + TLS + client-initiated heartbeat + blocking + "
-                     "raw resumable files).\n"
-                     "[system] Type HELP for commands.\n");
+    connection->send("[system] 已连接到聊天室服务（TLS、客户端心跳、好友屏蔽、文件断点续传已启用）。\n"
+                     "[system] 可输入数字命令 38 查看帮助。\n");
     return;
   }
 
@@ -124,13 +127,13 @@ void ChatServer::on_connection(const TcpConnectionPtr &connection) {
     remove_online_user(username, connection);
     remove_redis_presence_best_effort(username);
 
-    broadcast_to_logged_in("[system] " + username + " is offline.\n",
+    broadcast_to_logged_in("[system] " + username + " 已离线。\n",
                            connection);
   }
 
-  std::cout << "client disconnected: " << connection->name() << '\n';
+  std::cout << "客户端已断开：" << connection->name() << '\n';
 
-  spdlog::info("client disconnected: {}", connection->name());
+  spdlog::info("客户端已断开：{}", connection->name());
 }
 //消息事件处理
 void ChatServer::on_message(const TcpConnectionPtr &connection,
@@ -138,10 +141,13 @@ void ChatServer::on_message(const TcpConnectionPtr &connection,
   const std::shared_ptr<ClientSession> session = session_of(connection);
 
   if (session == nullptr) {
-    connection->send("[error] session state is unavailable.\n");
+    connection->send("[error] 会话状态不可用。\n");
     connection->forceClose();
     return;
   }
+
+  std::size_t processed_text_commands = 0U;
+  static constexpr std::size_t kRealtimeCommandBatch = 32U;
 
   while (connection->connected()) {
     if (session->binary_upload &&
@@ -149,8 +155,7 @@ void ChatServer::on_message(const TcpConnectionPtr &connection,
       if (!session->upload ||
           session->upload->token != session->binary_upload->token) {
         session->binary_upload.reset();
-        connection->send("[error] binary upload state is invalid.maybe uplode "
-                         "task isvanish or the false token\n");
+        connection->send("[error] 二进制上传状态无效：上传任务已失效或传输令牌不匹配。\n");
         connection->forceClose();
         return;
       }
@@ -166,27 +171,29 @@ void ChatServer::on_message(const TcpConnectionPtr &connection,
               frame.remaining_bytes,
               static_cast<std::uint64_t>(buffer->readableBytes())));
 
-      std::uint64_t accepted_offset = 0U;
-      std::string error;
-
-      if (!file_transfer_service_.append_upload_bytes(
-              session->upload->temp_path, frame.next_offset, buffer->peek(),
-              consume, accepted_offset, error)) {
-        const std::string token = session->upload->token;
-
-        pause_file_upload(connection, *session, token, error);
-        return;
-      }
-
+      // 先把网络层的小块聚合进当前文件帧。旧实现每收到一次 Buffer
+      // 都会进入 FileTransferService 做 stat/open/append，大文件时系统调用极多。
+      const char *begin = buffer->peek();
+      frame.bytes.insert(frame.bytes.end(), begin, begin + consume);
       buffer->retrieve(consume);
 
-      frame.next_offset = accepted_offset;
-
+      frame.next_offset += static_cast<std::uint64_t>(consume);
       frame.remaining_bytes -= static_cast<std::uint64_t>(consume);
 
-      session->upload->received_size = accepted_offset;
-
       if (frame.remaining_bytes == 0U) {
+        std::uint64_t accepted_offset = 0U;
+        std::string error;
+        const char *bytes = frame.bytes.empty() ? nullptr : frame.bytes.data();
+
+        if (!file_transfer_service_.append_upload_bytes(
+                session->upload->temp_path, frame.start_offset, bytes,
+                frame.bytes.size(), accepted_offset, error)) {
+          const std::string token = session->upload->token;
+          pause_file_upload(connection, *session, token, error);
+          return;
+        }
+
+        session->upload->received_size = accepted_offset;
         session->binary_upload.reset();
       }
 
@@ -214,11 +221,22 @@ void ChatServer::on_message(const TcpConnectionPtr &connection,
 
     if (!command.name.empty()) {
       handle_command(connection, *session, command);
+      ++processed_text_commands;
+    }
+
+    // 一次 TLS read 可能带来 100 条甚至更多命令。旧实现会在同一个
+    // Reactor 回调里把所有数据库操作全部做完，期间同线程的心跳/其他连接得不到调度。
+    // 每处理 32 条主动让出事件循环；剩余已在 inputBuffer 的命令下一轮继续。
+    if (processed_text_commands >= kRealtimeCommandBatch &&
+        !session->binary_upload && buffer->findEOL() != nullptr) {
+      connection->getLoop()->queueInLoop(
+          [this, connection, buffer] { on_message(connection, buffer); });
+      return;
     }
   }
 
   if (!session->binary_upload && buffer->readableBytes() > kMaxInputBuffer) {
-    connection->send("[error] input line is too long; "
+    connection->send("[error] 输入行过长；"
                      "connection will close.\n");
     connection->shutdown();
   }
@@ -228,65 +246,63 @@ void ChatServer::handle_command(const TcpConnectionPtr &connection,
                                 ClientSession &session,
                                 const Command &command) {
   if (!command_router_.dispatch(connection, session, command)) {
-    connection->send("[error] unknown command about the first paremater. \n"
+    connection->send("[error] 未知命令，请输入当前状态支持的数字命令。 \n"
                      "Type HELP to see available commands.\n");
   }
 }
 
 void ChatServer::send_help(const TcpConnectionPtr &connection) {
   connection->send(
-      "[system] 数字命令列表（服务端命令）:\n"
-      "  1  REGISTER <username> <password>\n"
-      "  2  LOGIN <username> <password>\n"
-      "  3  LOGOUT\n"
-      "  4  DELETE_ACCOUNT <password> CONFIRM\n"
-      "  5  SAY <message>\n"
-      "  6  MSG (进入私聊会话后多行编辑)\n"
-      "  7  GROUP_MSG (进入群聊会话后多行编辑)\n"
-      "  8  ENTER_PRIVATE <username>\n"
-      "  9  ENTER_GROUP <group_name>\n"
-      "  10 LEAVE_CHAT\n"
-      "  11 HISTORY_PRIVATE <username> [count]\n"
-      "  12 HISTORY_GROUP <group_name> [count]\n"
-      "  13 FILES (当前会话文件记录)\n"
-      "  14 SEND_FILE <file_path>\n"
-      "  15 FRIENDS\n"
-      "  16 FRIEND_REQUESTS\n"
-      "  17 ADD_FRIEND <username>\n"
-      "  18 ACCEPT_FRIEND <username>\n"
-      "  19 REJECT_FRIEND <username>\n"
-      "  20 REMOVE_FRIEND <username>\n"
-      "  21 BLOCK_FRIEND <username>\n"
-      "  22 UNBLOCK_FRIEND <username>\n"
-      "  23 BLOCKED_FRIENDS\n"
-      "  24 CREATE_GROUP <group_name>\n"
-      "  25 DISSOLVE_GROUP <group_name>\n"
-      "  26 APPLY_GROUP <group_name>\n"
-      "  27 MY_GROUPS\n"
-      "  28 LEAVE_GROUP <group_name>\n"
-      "  29 GROUP_MEMBERS <group_name>\n"
-      "  30 ADD_GROUP_ADMIN <group_name> <username>\n"
-      "  31 REMOVE_GROUP_ADMIN <group_name> <username>\n"
-      "  32 GROUP_REQUESTS <group_name>\n"
-      "  33 APPROVE_GROUP <group_name> <username>\n"
-      "  34 REJECT_GROUP <group_name> <username>\n"
-      "  35 REMOVE_GROUP_MEMBER <group_name> <username>\n"
-      "  36 WHO\n"
-      "  37 PENDING (拉取离线消息/文件)\n"
-      "  38 此帮助\n"
-      "  39 LOCAL_HELP (本地帮助，含命令详解)\n"
-      "  40 LOCAL_DB (查看本地数据库路径)\n"
-      "  41 HISTORY_PUBLIC [count]\n"
-      "[system] 提示：命令 6 和 7 需在对应会话中直接输入数字触发多行编辑；\n"
-      "  其他命令按格式输入参数。输入 39 查看更详细的本地命令说明。\n");
+      "[system] 数字命令帮助：\n"
+      "  1  注册账户\n"
+      "  2  登录账户\n"
+      "  3  退出登录\n"
+      "  4  注销账户\n"
+      "  5  发送公共消息\n"
+      "  6  当前好友/群会话发送消息（客户端会继续让你选择输入模式）\n"
+      "  8  进入好友私聊\n"
+      "  9  进入群聊\n"
+      " 10  退出当前会话\n"
+      " 11  查看私聊历史\n"
+      " 12  查看群聊历史\n"
+      " 13  查看当前会话文件记录\n"
+      " 14  向当前会话发送文件\n"
+      " 15  好友列表\n"
+      " 16  好友申请\n"
+      " 17  添加好友\n"
+      " 18  通过好友申请\n"
+      " 19  拒绝好友申请\n"
+      " 20  删除好友\n"
+      " 21  屏蔽好友\n"
+      " 22  解除屏蔽\n"
+      " 23  屏蔽列表\n"
+      " 24  创建群\n"
+      " 25  解散群\n"
+      " 26  申请加入群\n"
+      " 27  我的群\n"
+      " 28  退出群\n"
+      " 29  查看群成员\n"
+      " 30  设置群管理员\n"
+      " 31  取消群管理员\n"
+      " 33  自动列出全部可处理申请并通过\n"
+      " 34  自动列出全部可处理申请并拒绝\n"
+      " 35  移出群成员\n"
+      " 36  在线用户\n"
+      " 37  拉取待处理离线消息/文件\n"
+      " 38  查看本帮助\n"
+      " 39  查看客户端完整数字命令帮助\n"
+      " 40  查看本地数据库/下载路径\n"
+      " 41  查看公共消息历史\n"
+      "[system] 注意：进入好友或群会话后不会自动弹出消息模式；"
+      "必须先输入 6，再选择 1=回车立即发送、2=长文本编辑模式。\n"
+      "[system] 数字 32 已取消用户入口，33/34 会自动查询你作为群主或管理员可处理的全部入群申请。\n");
 }
 
 void ChatServer::handle_register(const TcpConnectionPtr &connection,
                                  ClientSession &session,
                                  const std::string &arguments) {
   if (session.logged_in) {
-    connection->send("[error] LOGOUT before registering "
-                     "another account.\n");
+    connection->send("[error] 当前连接已经登录，请先退出登录后再注册其他账户。\n");
     return;
   }
 
@@ -294,9 +310,9 @@ void ChatServer::handle_register(const TcpConnectionPtr &connection,
 
   if (words.size() != 2U || !is_valid_username(words[0]) ||
       !is_valid_password(words[1])) {
-    connection->send("[error] usage: REGISTER <username> <password>; "
-                     "username 3-20 letters/digits/underscore, "
-                     "password 4-64 non-space characters.\n");
+    connection->send("[error] 用法：REGISTER <用户名> <密码>；"
+                     "用户名长度 3-20，只能包含字母、数字、下划线；"
+                     "密码长度 4-64，不能包含空格。\n");
     return;
   }
 
@@ -309,7 +325,7 @@ void ChatServer::handle_register(const TcpConnectionPtr &connection,
   }
 
   if (exists) {
-    connection->send("[error] username already exists.\n");
+    connection->send("[error] 用户名已存在。\n");
     return;
   }
 
@@ -317,7 +333,7 @@ void ChatServer::handle_register(const TcpConnectionPtr &connection,
   try {
     encoded = hash_password_pbkdf2(words[1]);
   } catch (const std::exception &exception) {
-    connection->send("[error] password hashing failed.\n");
+    connection->send("[error] 密码哈希处理失败。\n");
     std::cerr << exception.what() << '\n';
     return;
   }
@@ -327,22 +343,21 @@ void ChatServer::handle_register(const TcpConnectionPtr &connection,
     return;
   }
 
-  connection->send("[system] registration successful. "
-                   "Use command 2: 2 <username> <password>.\n");
+  connection->send("[system] 注册成功。请使用数字命令 2 登录。\n");
 }
 
 void ChatServer::handle_login(const TcpConnectionPtr &connection,
                               ClientSession &session,
                               const std::string &arguments) {
   if (session.logged_in) {
-    connection->send("[error] this connection is already logged in.\n");
+    connection->send("[error] 当前连接已经登录。\n");
     return;
   }
 
   const std::vector<std::string> words = split_words(arguments);
 
   if (words.size() != 2U) {
-    connection->send("[error] usage: LOGIN <username> <password>\n");
+    connection->send("[error] 用法：LOGIN <用户名> <密码>\n");
     return;
   }
 
@@ -355,12 +370,12 @@ void ChatServer::handle_login(const TcpConnectionPtr &connection,
   }
 
   if (!password_hash || !verify_password_pbkdf2(words[1], *password_hash)) {
-    connection->send("[error] invalid username or password.\n");
+    connection->send("[error] 用户名或密码错误。\n");
     return;
   }
 
   if (!register_online_user(words[0], connection)) {
-    connection->send("[error] this account is already logged in.\n");
+    connection->send("[error] 该账号已经登录。\n");
     return;
   }
 
@@ -372,10 +387,10 @@ void ChatServer::handle_login(const TcpConnectionPtr &connection,
   session.logged_in = true;
   session.username = words[0];
 
-  connection->send("[system] login successful. Welcome, " + session.username +
+  connection->send("[system] 登录成功，欢迎 " + session.username +
                    ".\n");
 
-  broadcast_to_logged_in("[system] " + session.username + " is online.\n",
+  broadcast_to_logged_in("[system] " + session.username + " 已上线。\n",
                          connection);
 
   notify_pending_requests(connection, session.username);
@@ -400,10 +415,16 @@ void ChatServer::handle_logout(const TcpConnectionPtr &connection,
 
   session.logged_in = false;
   session.username.clear();
+  session.realtime_private_target.clear();
+  session.realtime_private_generation = 0U;
+  session.realtime_group_name.clear();
+  session.realtime_group_id = 0U;
+  session.realtime_group_recipients.clear();
+  session.realtime_group_generation = 0U;
 
-  connection->send("[system] logout successful.\n");
+  connection->send("[system] 退出登录成功。\n");
 
-  broadcast_to_logged_in("[system] " + username + " is offline.\n", connection);
+  broadcast_to_logged_in("[system] " + username + " 已离线。\n", connection);
 }
 
 void ChatServer::handle_delete_account(const TcpConnectionPtr &connection,
@@ -418,7 +439,7 @@ void ChatServer::handle_delete_account(const TcpConnectionPtr &connection,
 
   if (words.size() != 2U || words[1] != "CONFIRM") {
 
-    connection->send("[error] usage: "
+    connection->send("[error] 用法："
                      "DELETE_ACCOUNT <current_password> CONFIRM\n");
 
     return;
@@ -427,7 +448,7 @@ void ChatServer::handle_delete_account(const TcpConnectionPtr &connection,
   if (session.upload || session.binary_upload ||
       !session.file_deliveries_in_progress.empty()) {
 
-    connection->send("[error] finish or cancel active file transfers "
+    connection->send("[error] 请先完成或取消当前文件传输，再执行账户操作。"
                      "before deleting the account.\n");
 
     return;
@@ -446,7 +467,7 @@ void ChatServer::handle_delete_account(const TcpConnectionPtr &connection,
 
   if (!password_hash || !verify_password_pbkdf2(words[0], *password_hash)) {
 
-    connection->send("[error] current password is incorrect.\n");
+    connection->send("[error] 当前密码错误。\n");
 
     return;
   }
@@ -468,10 +489,14 @@ void ChatServer::handle_delete_account(const TcpConnectionPtr &connection,
   }
 
   if (!removed) {
-    connection->send("[error] account no longer exists.\n");
+    connection->send("[error] 账户已不存在。\n");
 
     return;
   }
+
+  direct_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+  group_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+
   //MYSQL永久删除
   // 7. 从本服务器在线用户表移除
   remove_online_user(username, connection);
@@ -487,7 +512,7 @@ void ChatServer::handle_delete_account(const TcpConnectionPtr &connection,
     // Redis 是缓存。
     // 即使 Redis 清理失败，也不能把已经从 MySQL
     // 删除的账号“恢复”。
-    spdlog::warn("failed to clear Redis unread cache "
+    spdlog::warn("清理 Redis 未读缓存失败："
                  "for deleted account {}: {}",
                  username, redis_error);
   }
@@ -500,14 +525,14 @@ void ChatServer::handle_delete_account(const TcpConnectionPtr &connection,
   session.file_deliveries_in_progress.clear();
 
   // 11. 通知当前客户端
-  connection->send("[system] account deleted successfully. "
+  connection->send("[system] 账户注销成功。"
                    "You are now logged out.\n");
 
   // 12. 通知其他在线用户
-  broadcast_to_logged_in("[system] " + username + " is offline.\n", connection);
+  broadcast_to_logged_in("[system] " + username + " 已离线。\n", connection);
 
   // 13. spdlog 记录
-  spdlog::info("account deleted: {}", username);
+  spdlog::info("账户已注销：{}", username);
 }
 
 void ChatServer::handle_public_message(const TcpConnectionPtr &connection,
@@ -519,7 +544,7 @@ void ChatServer::handle_public_message(const TcpConnectionPtr &connection,
 
   const std::string cleaned = trim(message);
   if (cleaned.empty() || cleaned.size() > kMaxChatMessage) {
-    connection->send("[error] SAY requires 1-1000 bytes "
+    connection->send("[error] 公共消息长度必须为 1-1000 字节。"
                      "of message text.\n");
     return;
   }
@@ -544,41 +569,37 @@ void ChatServer::handle_public_message(const TcpConnectionPtr &connection,
 }
 
 void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
-                                        const ClientSession &session,
+                                        ClientSession &session,
                                         const std::string &arguments) {
-  if (!require_login(connection, session, "sending private messages")) {
+  if (!require_login(connection, session, "发送好友私聊消息")) {
     return;
   }
 
   std::string target;
   std::string encoded_message;
-
   if (!split_first_token(arguments, target, encoded_message) ||
       !is_valid_username(target) || encoded_message.empty()) {
-    connection->send("[error] usage: MSG <username> <percent-encoded-message>\n");
+    connection->send("[error] 用法：MSG <用户名> <百分号编码消息>\n");
     return;
   }
 
   std::string message;
   std::string decode_error;
   if (!fileutil::percent_decode(encoded_message, message, decode_error)) {
-    connection->send("[error] invalid percent-encoded private message.\n");
+    connection->send("[error] 私聊消息编码无效。\n");
     return;
   }
 
   if (message.empty() || message.size() > kMaxChatMessage) {
-    connection->send("[error] private message must be 1-1000 bytes after decoding.\n");
+    connection->send("[error] 私聊消息解码后长度必须为 1-1000 字节。\n");
     return;
   }
 
   const std::string sender = session.username;
   if (target == sender) {
-    connection->send("[error] you cannot message yourself.\n");
+    connection->send("[error] 不能给自己发送私聊消息。\n");
     return;
   }
-
-  std::string error;
-  std::uint64_t message_id = 0;
 
   ChatMessagePayload payload;
   payload.set_type(chatroom::v7::PRIVATE);
@@ -587,73 +608,90 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
   payload.set_content(message);
   payload.set_created_at_unix_ms(now_unix_ms());
 
+  std::string error;
+  std::uint64_t message_id = 0U;
+  std::uint64_t policy_generation_used = 0U;
+
   {
+    // 好友/屏蔽变更也使用同一把锁。只要 generation 没变，
+    // 进入会话时已经验证过的目标就不需要每条消息再做 4 次权限 SQL。
     std::lock_guard<std::mutex> operation_lock(friend_operation_mutex_);
 
-    const DirectMessageDecision decision =
-        direct_message_policy_.evaluate(sender, target, error);
+    const std::uint64_t current_generation =
+        direct_policy_generation_.load(std::memory_order_relaxed);
 
-    if (decision == DirectMessageDecision::DatabaseError) {
-      database_error(connection, "checking private-message policy", error);
-      return;
+    const bool cached_allowed =
+        session.realtime_private_target == target &&
+        session.realtime_private_generation == current_generation;
+
+    if (!cached_allowed) {
+      const DirectMessageDecision decision =
+          direct_message_policy_.evaluate(sender, target, error);
+
+      if (decision == DirectMessageDecision::DatabaseError) {
+        database_error(connection, "检查私聊权限", error);
+        return;
+      }
+      if (decision == DirectMessageDecision::TargetMissing) {
+        connection->send("[error] 目标账户不存在。\n");
+        return;
+      }
+      if (decision == DirectMessageDecision::NotFriends) {
+        connection->send("[error] 当前不允许向该用户发送私聊消息，只有好友之间可以私聊。\n");
+        return;
+      }
+      if (decision == DirectMessageDecision::BlockedByRecipient) {
+        connection->send("[error] 对方已屏蔽你。\n");
+        return;
+      }
+      if (decision == DirectMessageDecision::BlockedBySender) {
+        connection->send("[error] 你已屏蔽该用户，请先解除屏蔽。\n");
+        return;
+      }
+
+      session.realtime_private_target = target;
+      session.realtime_private_generation = current_generation;
     }
 
-    if (decision == DirectMessageDecision::TargetMissing) {
-      connection->send("[error] target account does not exist.\n");
-      return;
-    }
-
-    if (decision == DirectMessageDecision::NotFriends) {
-      connection->send("[error] private messaging is allowed "
-                       "only between friends.\n");
-      return;
-    }
-
-    if (decision == DirectMessageDecision::BlockedByRecipient) {
-      connection->send("[error] recipient has blocked you.\n");
-      return;
-    }
-
-    // 新增：检查是否是你屏蔽了对方
-    if (decision == DirectMessageDecision::BlockedBySender) {
-      connection->send("[error] you have blocked this user, please unblock first.\n");
-      return;
-    }
+    policy_generation_used = session.realtime_private_generation;
 
     if (!database_.add_private_message_with_delivery(payload, message_id,
                                                      error)) {
-      database_error(connection, "saving private message", error);
+      database_error(connection, "保存私聊消息", error);
       return;
     }
   }
 
-  adjust_redis_unread_best_effort(target, "private", 1);
+  bool live_delivery_allowed = true;
 
-  TcpConnectionPtr target_connection;
+  // 如果消息持久化期间恰好发生了好友/屏蔽关系变化，只在这种少见情况重新校验。
+  if (policy_generation_used !=
+      direct_policy_generation_.load(std::memory_order_relaxed)) {
+    std::lock_guard<std::mutex> operation_lock(friend_operation_mutex_);
+    const DirectMessageDecision decision =
+        direct_message_policy_.evaluate(sender, target, error);
+    live_delivery_allowed = decision == DirectMessageDecision::Allowed;
 
-  bool blocked_before_live_delivery = false;
-
-  if (!database_.is_friend_blocked(target, sender, blocked_before_live_delivery,
-                                   error)) {
-    std::cerr << "failed to recheck block before live delivery of #"
-              << message_id << ": " << error << '\n';
-    blocked_before_live_delivery = true;
+    if (live_delivery_allowed) {
+      session.realtime_private_target = target;
+      session.realtime_private_generation =
+          direct_policy_generation_.load(std::memory_order_relaxed);
+    }
   }
 
-  if (!blocked_before_live_delivery &&
+  TcpConnectionPtr target_connection;
+  if (live_delivery_allowed &&
       find_online_user(target, target_connection)) {
-    target_connection->send(
+    const std::string target_wire =
         "[#" + std::to_string(message_id) + "] [private from " + sender + "] " +
-            encode_text_token(message) + "\n",
+        encode_text_token(message) + "\n";
+
+    target_connection->send(
+        target_wire,
         [this, message_id, target] {
-          std::string delivery_error;
-          if (!database_.mark_private_message_delivered(
-                  message_id, target, now_unix_ms(), delivery_error)) {
-            std::cerr << "failed to mark private message #" << message_id
-                      << " delivered: " << delivery_error << '\n';
-          } else {
-            adjust_redis_unread_best_effort(target, "private", -1);
-          }
+          // 只排队，真正 UPDATE 由后台线程做；绝不在接收方 Reactor 里查数据库。
+          enqueue_delivery_persist(DeliveryPersistKind::Private,
+                                   message_id, target);
         });
 
     connection->send("[#" + std::to_string(message_id) + "] [private to " +
@@ -661,11 +699,14 @@ void ChatServer::handle_private_message(const TcpConnectionPtr &connection,
     return;
   }
 
+  // Redis 只是未读缓存。在线实时投递不再做 +1 再 -1 的两次网络往返；
+  // 只有当前没有实时投递时才记录未读。
+  adjust_redis_unread_best_effort(target, "private", 1);
+
   connection->send("[#" + std::to_string(message_id) + "] [private to " +
                    target + "] " + encode_text_token(message) +
                    "\n"
-                   "[system] the message is stored and remains pending "
-                   "until the recipient is eligible for direct delivery.\n");
+                   "[system] 消息已保存；对方满足投递条件后会自动收到。\n");
 }
 
 void ChatServer::handle_who(const TcpConnectionPtr &connection,
@@ -676,7 +717,7 @@ void ChatServer::handle_who(const TcpConnectionPtr &connection,
 
   const std::vector<std::string> names = online_users_.usernames();
 
-  connection->send("[system] online users (" + std::to_string(names.size()) +
+  connection->send("[system] 在线用户（" + std::to_string(names.size()) +
                    "): " + join_names(names) + "\n");
 }
 
@@ -695,7 +736,7 @@ void ChatServer::handle_add_friend(const TcpConnectionPtr &connection,
 
   const std::string sender = session.username;
   if (sender == target) {
-    connection->send("[error] you cannot add yourself.\n");
+    connection->send("[error] 不能添加自己为好友。\n");
     return;
   }
 
@@ -715,7 +756,7 @@ void ChatServer::handle_add_friend(const TcpConnectionPtr &connection,
     }
 
     if (!exists) {
-      connection->send("[error] user " + target + " does not exist.\n");
+      connection->send("[error] 用户 " + target + " 不存在。\n");
       return;
     }
 
@@ -725,7 +766,7 @@ void ChatServer::handle_add_friend(const TcpConnectionPtr &connection,
     }
 
     if (friends) {
-      connection->send("[error] " + target + " is already your friend.\n");
+      connection->send("[error] " + target + " 已经是你的好友。\n");
       return;
     }
 
@@ -736,15 +777,13 @@ void ChatServer::handle_add_friend(const TcpConnectionPtr &connection,
     }
 
     if (already_sent) {
-      connection->send("[error] friend request already sent.\n");
+      connection->send("[error] 好友申请已经发送过。\n");
       return;
     }
 
     if (reverse_request) {
       connection->send("[error] " + target +
-                       " already sent you a request. "
-                       "Use command 18 with this username: 18 " +
-                       target + ".\n");
+                       " 已经向你发送好友申请，请使用数字命令 18 通过该申请。\n");
       return;
     }
 
@@ -760,15 +799,14 @@ void ChatServer::handle_add_friend(const TcpConnectionPtr &connection,
     event.set_occurred_at_unix_ms(now_unix_ms());
 
     if (!database_.add_friend_event(event, error)) {
-      std::cerr << "friend event insert failed: " << error << '\n';
+      std::cerr << "写入好友事件失败：" << error << '\n';
     }
   }
 
-  connection->send("[system] friend request sent to " + target + ".\n");
+  connection->send("[system] 已向 " + target + " 发送好友申请。\n");
 
-  notify_user_if_online(target, "[system] friend request from " + sender +
-                                    ". accept :18 " + sender +
-                                    " or reject :19 " + sender + ".\n");
+  notify_user_if_online(target, "[system] 收到来自 " + sender +
+                                    " 的好友申请。使用 18 通过，或使用 19 拒绝。\n");
 }
 
 void ChatServer::handle_accept_friend(const TcpConnectionPtr &connection,
@@ -792,8 +830,7 @@ void ChatServer::handle_accept_friend(const TcpConnectionPtr &connection,
 
     if (!database_.accept_friend_request(requester, current, error)) {
       if (error == "friend request does not exist") {
-        connection->send("[error] no pending friend request from " + requester +
-                         ".\n");
+        connection->send("[error] 没有来自 " + requester + " 的待处理好友申请。\n");
       } else {
         database_error(connection, "accepting friend request", error);
       }
@@ -807,14 +844,16 @@ void ChatServer::handle_accept_friend(const TcpConnectionPtr &connection,
     event.set_occurred_at_unix_ms(now_unix_ms());
 
     if (!database_.add_friend_event(event, error)) {
-      std::cerr << "friend event insert failed: " << error << '\n';
+      std::cerr << "写入好友事件失败：" << error << '\n';
     }
   }
 
-  connection->send("[system] you and " + requester + " are now friends.\n");
+  direct_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+  connection->send("[system] 你和 " + requester + " 现在已经是好友。\n");
 
   notify_user_if_online(requester, "[system] " + current +
-                                       " accepted your friend request.\n");
+                                       " 已通过你的好友申请。\n");
 }
 
 void ChatServer::handle_reject_friend(const TcpConnectionPtr &connection,
@@ -844,8 +883,7 @@ void ChatServer::handle_reject_friend(const TcpConnectionPtr &connection,
     }
 
     if (!removed) {
-      connection->send("[error] no pending friend request from " + requester +
-                       ".\n");
+      connection->send("[error] 没有来自 " + requester + " 的待处理好友申请。\n");
       return;
     }
 
@@ -856,15 +894,14 @@ void ChatServer::handle_reject_friend(const TcpConnectionPtr &connection,
     event.set_occurred_at_unix_ms(now_unix_ms());
 
     if (!database_.add_friend_event(event, error)) {
-      std::cerr << "friend event insert failed: " << error << '\n';
+      std::cerr << "写入好友事件失败：" << error << '\n';
     }
   }
 
-  connection->send("[system] friend request from " + requester +
-                   " rejected.\n");
+  connection->send("[system] 已拒绝来自 " + requester + " 的好友申请。\n");
 
   notify_user_if_online(requester, "[system] " + current +
-                                       " rejected your friend request.\n");
+                                       " 已拒绝你的好友申请。\n");
 }
 
 void ChatServer::handle_remove_friend(const TcpConnectionPtr &connection,
@@ -894,7 +931,7 @@ void ChatServer::handle_remove_friend(const TcpConnectionPtr &connection,
     }
 
     if (!removed) {
-      connection->send("[error] " + target + " is not your friend.\n");
+      connection->send("[error] " + target + " 不是你的好友。\n");
       return;
     }
 
@@ -905,14 +942,16 @@ void ChatServer::handle_remove_friend(const TcpConnectionPtr &connection,
     event.set_occurred_at_unix_ms(now_unix_ms());
 
     if (!database_.add_friend_event(event, error)) {
-      std::cerr << "friend event insert failed: " << error << '\n';
+      std::cerr << "写入好友事件失败：" << error << '\n';
     }
   }
 
-  connection->send("[system] removed " + target + " from friends.\n");
+  direct_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+  connection->send("[system] 已从好友列表删除 " + target + "。\n");
 
   notify_user_if_online(target, "[system] " + current +
-                                    " removed you from their friend list.\n");
+                                    " 已将你从好友列表删除。\n");
 }
 
 void ChatServer::handle_friends(const TcpConnectionPtr &connection,
@@ -930,15 +969,15 @@ void ChatServer::handle_friends(const TcpConnectionPtr &connection,
   }
 
   std::ostringstream output;
-  output << "[system] friends (" << friends.size() << "):\n";
+  output << "[system] 好友列表（" << friends.size() << "）：\n";
 
   for (const std::string &name : friends) {
     output << "  " << name << " ["
-           << (is_user_online(name) ? "online" : "offline") << "]\n";
+           << (is_user_online(name) ? "在线" : "离线") << "]\n";
   }
 
   if (friends.empty()) {
-    output << "  (none)\n";
+    output << "  （无）\n";
   }
 
   connection->send(output.str());
@@ -961,11 +1000,11 @@ void ChatServer::handle_friend_requests(const TcpConnectionPtr &connection,
   }
 
   connection->send(
-      "[system] incoming requests (" + std::to_string(incoming.size()) +
-      "): " + join_names(incoming) +
+      "[system] 收到的好友申请（" + std::to_string(incoming.size()) +
+      "）：" + join_names(incoming) +
       "\n"
-      "[system] outgoing requests (" +
-      std::to_string(outgoing.size()) + "): " + join_names(outgoing) + "\n");
+      "[system] 已发出的好友申请（" +
+      std::to_string(outgoing.size()) + "）：" + join_names(outgoing) + "\n");
 }
 
 void ChatServer::handle_history_public(const TcpConnectionPtr &connection,
@@ -979,8 +1018,8 @@ void ChatServer::handle_history_public(const TcpConnectionPtr &connection,
 
   if (!trim(arguments).empty() &&
       !parse_count(trim(arguments), 1U, kMaxHistoryCount, count)) {
-    connection->send("[error] usage: HISTORY_PUBLIC [count], "
-                     "count must be 1-100.\n");
+    connection->send("[error] 用法：HISTORY_PUBLIC [条数]，"
+                     "条数必须在 1-100 之间。\n");
     return;
   }
 
@@ -1015,8 +1054,8 @@ void ChatServer::handle_history_private(const TcpConnectionPtr &connection,
   const std::vector<std::string> words = split_words(arguments);
 
   if (words.empty() || words.size() > 2U || !is_valid_username(words[0])) {
-    connection->send("[error] usage: HISTORY_PRIVATE "
-                     "<username> [count]\n");
+    connection->send("[error] 用法：HISTORY_PRIVATE "
+                     "<用户名> [条数]\n");
     return;
   }
 
@@ -1038,7 +1077,7 @@ void ChatServer::handle_history_private(const TcpConnectionPtr &connection,
   }
 
   if (!exists) {
-    connection->send("[error] user does not exist.\n");
+    connection->send("[error] 用户不存在。\n");
     return;
   }
 
@@ -1091,7 +1130,7 @@ void ChatServer::handle_create_group(const TcpConnectionPtr &connection,
     }
 
     if (existing) {
-      connection->send("[error] group name is already in use.\n");
+      connection->send("[error] 群名称已被使用。\n");
       return;
     }
 
@@ -1102,9 +1141,11 @@ void ChatServer::handle_create_group(const TcpConnectionPtr &connection,
     }
   }
 
-  connection->send("[system] group " + group_name +
-                   " created. You are the owner. group_id=" +
-                   std::to_string(group_id) + ".\n");
+  group_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+  connection->send("[system] 群 " + group_name +
+                   " 创建成功，你是群主。群ID=" +
+                   std::to_string(group_id) + "。\n");
 }
 
 void ChatServer::handle_dissolve_group(const TcpConnectionPtr &connection,
@@ -1133,8 +1174,7 @@ void ChatServer::handle_dissolve_group(const TcpConnectionPtr &connection,
     }
 
     if (!role || *role != GroupRole::Owner) {
-      connection->send("[error] only the group owner can dissolve "
-                       "this group.\n");
+      connection->send("[error] 只有群主可以解散该群。\n");
       return;
     }
 
@@ -1151,17 +1191,18 @@ void ChatServer::handle_dissolve_group(const TcpConnectionPtr &connection,
     }
 
     if (!removed) {
-      connection->send("[error] group no longer exists.\n");
+      connection->send("[error] 群已不存在。\n");
       return;
     }
   }
 
-  connection->send("[system] group " + group_name + " dissolved.\n");
+  group_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+  connection->send("[system] 群 " + group_name + " 已解散。\n");
 
   for (const std::string &member : members) {
     if (member != session.username) {
-      notify_user_if_online(member, "[system] group " + group_name +
-                                        " was dissolved by owner " +
+      notify_user_if_online(member, "[system] 群 " + group_name +
+                                        " 已被群主解散，群主：" +
                                         session.username + ".\n");
     }
   }
@@ -1192,7 +1233,7 @@ void ChatServer::handle_apply_group(const TcpConnectionPtr &connection,
     }
 
     if (!group) {
-      connection->send("[error] group does not exist.\n");
+      connection->send("[error] 群不存在。\n");
       return;
     }
 
@@ -1203,7 +1244,7 @@ void ChatServer::handle_apply_group(const TcpConnectionPtr &connection,
     }
 
     if (role) {
-      connection->send("[error] you are already a member of this group.\n");
+      connection->send("[error] 你已经是该群成员。\n");
       return;
     }
 
@@ -1215,7 +1256,7 @@ void ChatServer::handle_apply_group(const TcpConnectionPtr &connection,
     }
 
     if (pending) {
-      connection->send("[error] group join request is already pending.\n");
+      connection->send("[error] 入群申请已经在等待处理。\n");
       return;
     }
 
@@ -1226,13 +1267,12 @@ void ChatServer::handle_apply_group(const TcpConnectionPtr &connection,
     }
   }
 
-  connection->send("[system] join request sent to group " + group_name + ".\n");
+  connection->send("[system] 已向群 " + group_name + " 提交入群申请。\n");
 
   notify_group_managers(
       group_name,
-      "[system] " + session.username + " applied to join group " + group_name +
-          ". Use command 33: 33 " + group_name + " " + session.username +
-          " or REJECT_GROUP " + group_name + " " + session.username + ".\n",
+      "[system] " + session.username + " 申请加入群 " + group_name +
+          "。请使用数字命令 33 通过或 34 拒绝，客户端会自动列出并编号。\n",
       session.username);
 }
 
@@ -1251,16 +1291,16 @@ void ChatServer::handle_my_groups(const TcpConnectionPtr &connection,
   }
 
   std::ostringstream output;
-  output << "[system] joined groups (" << groups.size() << "):\n";
+  output << "[system] 已加入的群（" << groups.size() << "）：\n";
 
   for (const GroupMembership &membership : groups) {
     output << "  " << membership.group.name << " ["
            << group_role_name(membership.role)
-           << "] owner=" << membership.group.owner_username << "\n";
+           << "] 群主=" << membership.group.owner_username << "\n";
   }
 
   if (groups.empty()) {
-    output << "  (none)\n";
+    output << "  （无）\n";
   }
 
   connection->send(output.str());
@@ -1291,12 +1331,12 @@ void ChatServer::handle_leave_group(const TcpConnectionPtr &connection,
     }
 
     if (!role) {
-      connection->send("[error] you are not a member of this group.\n");
+      connection->send("[error] 你不是该群成员。\n");
       return;
     }
 
     if (*role == GroupRole::Owner) {
-      connection->send("[error] the owner cannot leave directly; "
+      connection->send("[error] 群主不能直接退出群，请先解散群或转移职责。"
                        "use command 25.\n");
       return;
     }
@@ -1309,16 +1349,17 @@ void ChatServer::handle_leave_group(const TcpConnectionPtr &connection,
     }
 
     if (!removed) {
-      connection->send("[error] membership no longer exists.\n");
+      connection->send("[error] 群成员关系已不存在。\n");
       return;
     }
   }
 
-  connection->send("[system] left group " + group_name + ".\n");
+  group_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+  connection->send("[system] 已退出群 " + group_name + "。\n");
 
   notify_group_managers(group_name,
-                        "[system] " + session.username + " left group " +
-                            group_name + ".\n",
+                        "[system] " + session.username + " 已退出群 " +
+                            group_name + "。\n",
                         session.username);
 }
 
@@ -1345,7 +1386,7 @@ void ChatServer::handle_group_members(const TcpConnectionPtr &connection,
   }
 
   if (!current_role) {
-    connection->send("[error] only group members can view "
+    connection->send("[error] 只有群成员可以查看该内容。"
                      "the member list.\n");
     return;
   }
@@ -1402,23 +1443,22 @@ void ChatServer::handle_add_group_admin(const TcpConnectionPtr &connection,
     }
 
     if (!current_role || *current_role != GroupRole::Owner) {
-      connection->send("[error] only the group owner can add "
-                       "administrators.\n");
+      connection->send("[error] 只有群主可以设置管理员。\n");
       return;
     }
 
     if (!target_role) {
-      connection->send("[error] target user is not a group member.\n");
+      connection->send("[error] 目标用户不是群成员。\n");
       return;
     }
 
     if (*target_role == GroupRole::Owner) {
-      connection->send("[error] the owner is already above admin role.\n");
+      connection->send("[error] 群主权限高于管理员，无需设置。\n");
       return;
     }
 
     if (*target_role == GroupRole::Admin) {
-      connection->send("[error] target user is already an administrator.\n");
+      connection->send("[error] 目标用户已经是管理员。\n");
       return;
     }
 
@@ -1430,17 +1470,17 @@ void ChatServer::handle_add_group_admin(const TcpConnectionPtr &connection,
     }
 
     if (!changed) {
-      connection->send("[error] group role was not changed.\n");
+      connection->send("[error] 群角色没有发生变化。\n");
       return;
     }
   }
 
-  connection->send("[system] " + target + " is now an administrator of " +
+  connection->send("[system] " + target + " 现在是管理员，群：" +
                    group_name + ".\n");
 
-  notify_user_if_online(target, "[system] you were promoted to administrator "
+  notify_user_if_online(target, "[system] 你已被提升为管理员，"
                                 "of group " +
-                                    group_name + " by " + session.username +
+                                    group_name + "，操作者：" + session.username +
                                     ".\n");
 }
 
@@ -1476,13 +1516,12 @@ void ChatServer::handle_remove_group_admin(const TcpConnectionPtr &connection,
     }
 
     if (!current_role || *current_role != GroupRole::Owner) {
-      connection->send("[error] only the group owner can remove "
-                       "administrators.\n");
+      connection->send("[error] 只有群主可以取消管理员。\n");
       return;
     }
 
     if (!target_role || *target_role != GroupRole::Admin) {
-      connection->send("[error] target user is not an administrator.\n");
+      connection->send("[error] 目标用户不是管理员。\n");
       return;
     }
 
@@ -1494,16 +1533,16 @@ void ChatServer::handle_remove_group_admin(const TcpConnectionPtr &connection,
     }
 
     if (!changed) {
-      connection->send("[error] group role was not changed.\n");
+      connection->send("[error] 群角色没有发生变化。\n");
       return;
     }
   }
 
-  connection->send("[system] " + target + " is now a normal member of " +
+  connection->send("[system] " + target + " 现在是普通成员，群：" +
                    group_name + ".\n");
 
-  notify_user_if_online(target, "[system] your administrator role in group " +
-                                    group_name + " was removed by " +
+  notify_user_if_online(target, "[system] 你在群 " +
+                                    group_name + " 的管理员身份已被取消，操作者：" +
                                     session.username + ".\n");
 }
 
@@ -1529,8 +1568,7 @@ void ChatServer::handle_group_requests(const TcpConnectionPtr &connection,
   }
 
   if (!role || !is_group_manager(*role)) {
-    connection->send("[error] only the group owner/admin can view "
-                     "join requests.\n");
+    connection->send("[error] 只有群主或管理员可以查看入群申请。\n");
     return;
   }
 
@@ -1541,9 +1579,49 @@ void ChatServer::handle_group_requests(const TcpConnectionPtr &connection,
     return;
   }
 
-  connection->send("[group " + group_name + "] pending join requests (" +
+  connection->send("[group " + group_name + "] 待处理入群申请（" +
                    std::to_string(users.size()) + "): " + join_names(users) +
                    "\n");
+}
+
+void ChatServer::handle_group_requests_all(const TcpConnectionPtr &connection,
+                                           const ClientSession &session) {
+  if (!require_login(connection, session, "查看全部可处理入群申请")) {
+    return;
+  }
+
+  std::vector<ManagedGroupRequestCount> groups;
+  std::string error;
+  if (!database_.list_managed_group_request_counts(session.username, groups,
+                                                   error)) {
+    connection->send("[group-requests-error] " +
+                     encode_text_token("加载可管理群的入群申请失败：" + error) +
+                     "\n");
+    return;
+  }
+
+  connection->send("[group-requests-begin]\n");
+
+  // 这里只展示当前用户是群主或管理员的群。数据库查询已经限制 member_role IN (1,2)。
+  // 对每个有待处理申请的群读取申请人，客户端统一编号后供 33/34 选择。
+  for (const ManagedGroupRequestCount &group : groups) {
+    std::vector<std::string> users;
+    if (!database_.list_group_join_requests(group.group_name, users, error)) {
+      connection->send("[group-requests-error] " +
+                       encode_text_token("加载群 " + group.group_name +
+                                         " 的入群申请失败：" + error) +
+                       "\n");
+      return;
+    }
+
+    for (const std::string &username : users) {
+      connection->send("[group-request-item] " +
+                       encode_text_token(group.group_name) + " " +
+                       encode_text_token(username) + "\n");
+    }
+  }
+
+  connection->send("[group-requests-end]\n");
 }
 
 void ChatServer::handle_approve_group(const TcpConnectionPtr &connection,
@@ -1575,8 +1653,7 @@ void ChatServer::handle_approve_group(const TcpConnectionPtr &connection,
     }
 
     if (!current_role || !is_group_manager(*current_role)) {
-      connection->send("[error] only the group owner/admin can approve "
-                       "join requests.\n");
+      connection->send("[error] 只有群主或管理员可以通过入群申请。\n");
       return;
     }
 
@@ -1587,8 +1664,7 @@ void ChatServer::handle_approve_group(const TcpConnectionPtr &connection,
     }
 
     if (!pending) {
-      connection->send("[error] no pending join request from " + target +
-                       ".\n");
+      connection->send("[error] 没有来自 " + target + " 的待处理入群申请。\n");
       return;
     }
 
@@ -1598,11 +1674,13 @@ void ChatServer::handle_approve_group(const TcpConnectionPtr &connection,
     }
   }
 
-  connection->send("[system] " + target + " joined group " + group_name +
-                   ".\n");
+  group_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
 
-  notify_user_if_online(target, "[system] your request to join group " +
-                                    group_name + " was approved by " +
+  connection->send("[system] " + target + " 已加入群 " + group_name +
+                   "。\n");
+
+  notify_user_if_online(target, "[system] 你申请加入群 " +
+                                    group_name + " 已通过，处理人：" +
                                     session.username + ".\n");
 }
 
@@ -1635,8 +1713,7 @@ void ChatServer::handle_reject_group(const TcpConnectionPtr &connection,
     }
 
     if (!current_role || !is_group_manager(*current_role)) {
-      connection->send("[error] only the group owner/admin can reject "
-                       "join requests.\n");
+      connection->send("[error] 只有群主或管理员可以拒绝入群申请。\n");
       return;
     }
 
@@ -1648,17 +1725,16 @@ void ChatServer::handle_reject_group(const TcpConnectionPtr &connection,
     }
 
     if (!removed) {
-      connection->send("[error] no pending join request from " + target +
-                       ".\n");
+      connection->send("[error] 没有来自 " + target + " 的待处理入群申请。\n");
       return;
     }
   }
 
-  connection->send("[system] rejected " + target + "'s request to join " +
+  connection->send("[system] 已拒绝 " + target + " 加入群 " +
                    group_name + ".\n");
 
-  notify_user_if_online(target, "[system] your request to join group " +
-                                    group_name + " was rejected by " +
+  notify_user_if_online(target, "[system] 你申请加入群 " +
+                                    group_name + " 已被拒绝，处理人：" +
                                     session.username + ".\n");
 }
 
@@ -1679,7 +1755,7 @@ void ChatServer::handle_remove_group_member(const TcpConnectionPtr &connection,
   }
 
   if (target == session.username) {
-    connection->send("[error] use command 28 to leave yourself.\n");
+    connection->send("[error] 不能通过移出成员操作移出自己，请使用退出群命令。\n");
     return;
   }
 
@@ -1699,22 +1775,22 @@ void ChatServer::handle_remove_group_member(const TcpConnectionPtr &connection,
     }
 
     if (!current_role || !is_group_manager(*current_role)) {
-      connection->send("[error] only group owner/admin can remove members.\n");
+      connection->send("[error] 只有群主或管理员可以移出成员。\n");
       return;
     }
 
     if (!target_role) {
-      connection->send("[error] target user is not a group member.\n");
+      connection->send("[error] 目标用户不是群成员。\n");
       return;
     }
 
     if (*target_role == GroupRole::Owner) {
-      connection->send("[error] the group owner cannot be removed.\n");
+      connection->send("[error] 不能移出群主。\n");
       return;
     }
 
     if (*current_role == GroupRole::Admin && *target_role == GroupRole::Admin) {
-      connection->send("[error] an administrator cannot remove "
+      connection->send("[error] 管理员不能移出同级或更高权限成员。"
                        "another administrator.\n");
       return;
     }
@@ -1726,122 +1802,171 @@ void ChatServer::handle_remove_group_member(const TcpConnectionPtr &connection,
     }
 
     if (!removed) {
-      connection->send("[error] group membership no longer exists.\n");
+      connection->send("[error] 群成员关系已不存在。\n");
       return;
     }
   }
 
-  connection->send("[system] removed " + target + " from group " + group_name +
-                   ".\n");
+  group_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+  connection->send("[system] 已将 " + target + " 移出群 " + group_name +
+                   "。\n");
 
-  notify_user_if_online(target, "[system] you were removed from group " +
-                                    group_name + " by " + session.username +
-                                    ".\n");
+  // 如果被移出成员当前正拿着这个群的 FILE_OFFER，或者文件已经开始下行，
+  // 立即撤销。发送泵会在当前帧结束后检查取消标记，不再发送后续帧。
+  TcpConnectionPtr removed_connection;
+  if (find_online_user(target, removed_connection)) {
+    const std::shared_ptr<ClientSession> removed_session =
+        session_of(removed_connection);
+    if (removed_session != nullptr) {
+      for (auto it = removed_session->offered_files.begin();
+           it != removed_session->offered_files.end();) {
+        const StoredFileTransfer &offered = it->second;
+        if (offered.metadata.scope() != chatroom::v9::FILE_TRANSFER_GROUP ||
+            offered.metadata.group_name() != group_name) {
+          ++it;
+          continue;
+        }
+
+        const std::uint64_t transfer_id = it->first;
+        const auto cancel =
+            removed_session->file_delivery_cancel_flags.find(transfer_id);
+        if (cancel != removed_session->file_delivery_cancel_flags.end() &&
+            cancel->second) {
+          cancel->second->store(true);
+        }
+
+        removed_connection->send(
+            "FILE_ACCESS_REVOKED " + std::to_string(transfer_id) + " " +
+            encode_text_token("群成员权限已被撤销") + "\n");
+
+        if (removed_session->file_deliveries_in_progress.count(transfer_id) ==
+            0U) {
+          it = removed_session->offered_files.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+  }
+
+  notify_user_if_online(target, "[system] 你已被移出群 " +
+                                    group_name + "，操作者：" + session.username +
+                                    "。\n");
 }
 
 void ChatServer::handle_group_message(const TcpConnectionPtr &connection,
-                                      const ClientSession &session,
+                                      ClientSession &session,
                                       const std::string &arguments) {
-  if (!require_login(connection, session, "sending group messages")) {
+  if (!require_login(connection, session, "发送群消息")) {
     return;
   }
 
   std::string group_name;
   std::string encoded_message;
-
   if (!split_first_token(arguments, group_name, encoded_message) ||
       !is_valid_group_name(group_name) || encoded_message.empty()) {
-    connection->send("[error] usage: GROUP_MSG <group_name> "
-                     "<percent-encoded-message>.\n");
+    connection->send("[error] 用法：GROUP_MSG <群名称> <百分号编码消息>。\n");
     return;
   }
 
   std::string message;
   std::string decode_error;
   if (!fileutil::percent_decode(encoded_message, message, decode_error)) {
-    connection->send("[error] invalid percent-encoded group message.\n");
+    connection->send("[error] 群消息编码无效。\n");
     return;
   }
 
   if (message.empty() || message.size() > kMaxChatMessage) {
-    connection->send("[error] group message must be 1-1000 bytes after decoding.\n");
+    connection->send("[error] 群消息解码后长度必须为 1-1000 字节。\n");
     return;
   }
 
-  std::optional<GroupInfo> group;
-  std::optional<GroupRole> role;
-  std::vector<std::string> members;
+  std::uint64_t group_id = 0U;
+  std::vector<std::string> recipients;
   std::string error;
 
-  if (!database_.get_group(group_name, group, error) ||
-      !database_.get_group_role(group_name, session.username, role, error) ||
-      !database_.list_group_member_usernames(group_name, members, error)) {
-    database_error(connection, "loading group chat state", error);
-    return;
-  }
+  const std::uint64_t current_generation =
+      group_policy_generation_.load(std::memory_order_relaxed);
 
-  if (!group) {
-    connection->send("[error] group does not exist.\n");
-    return;
-  }
+  const bool cached_group =
+      session.realtime_group_name == group_name &&
+      session.realtime_group_id != 0U &&
+      session.realtime_group_generation == current_generation;
 
-  if (!role) {
-    connection->send("[error] only group members can send group messages.\n");
-    return;
-  }
+  if (cached_group) {
+    group_id = session.realtime_group_id;
+    recipients = session.realtime_group_recipients;
+  } else {
+    // 群成员没有变化时，这一组 SQL 只在进入群聊/版本失效后的第一条消息执行。
+    std::optional<GroupInfo> group;
+    std::optional<GroupRole> role;
+    std::vector<std::string> members;
 
-  std::vector<std::string> recipients;
-  recipients.reserve(members.size());
-
-  for (const std::string &member : members) {
-    if (member != session.username) {
-      recipients.push_back(member);
+    if (!database_.get_group(group_name, group, error) ||
+        !database_.get_group_role(group_name, session.username, role, error) ||
+        !database_.list_group_member_usernames(group_name, members, error)) {
+      database_error(connection, "加载群聊状态", error);
+      return;
     }
+
+    if (!group) {
+      connection->send("[error] 群不存在。\n");
+      return;
+    }
+    if (!role) {
+      connection->send("[error] 只有群成员可以发送群消息。\n");
+      return;
+    }
+
+    group_id = group->id;
+    recipients.reserve(members.size());
+    for (const std::string &member : members) {
+      if (member != session.username) {
+        recipients.push_back(member);
+      }
+    }
+
+    session.realtime_group_name = group_name;
+    session.realtime_group_id = group_id;
+    session.realtime_group_recipients = recipients;
+    session.realtime_group_generation = current_generation;
   }
 
   GroupMessagePayload payload;
-  payload.set_group_id(group->id);
+  payload.set_group_id(group_id);
   payload.set_group_name(group_name);
   payload.set_sender_username(session.username);
   payload.set_content(message);
   payload.set_created_at_unix_ms(now_unix_ms());
 
-  std::uint64_t message_id = 0;
-
+  std::uint64_t message_id = 0U;
   if (!database_.add_group_message(payload, recipients, message_id, error)) {
-    database_error(connection, "saving group message", error);
+    database_error(connection, "保存群消息", error);
     return;
   }
 
-  for (const std::string &recipient : recipients) {
-    adjust_redis_unread_best_effort(recipient, "group", 1);
-  }
+  const std::string wire_text =
+      "[#G" + std::to_string(message_id) + "] [group " + group_name + "] [" +
+      session.username + "] " + encode_text_token(message) + "\n";
 
-  const std::string wire_text = "[#G" + std::to_string(message_id) +
-                                "] [group " + group_name + "] [" +
-                                session.username + "] " +
-                                encode_text_token(message) + "\n";
-
+  // 发送者也立即收到带服务端消息 ID 的回显。
   connection->send(wire_text);
 
   for (const std::string &recipient : recipients) {
     TcpConnectionPtr target_connection;
 
-    if (!find_online_user(recipient, target_connection)) {
+    if (find_online_user(recipient, target_connection)) {
+      target_connection->send(
+          wire_text,
+          [this, message_id, recipient] {
+            enqueue_delivery_persist(DeliveryPersistKind::Group,
+                                     message_id, recipient);
+          });
       continue;
     }
 
-    target_connection->send(wire_text, [this, message_id, recipient] {
-      std::string delivery_error;
-      if (!database_.mark_group_message_delivered(
-              message_id, recipient, now_unix_ms(), delivery_error)) {
-        std::cerr << "failed to mark group message #" << message_id
-                  << " delivered to " << recipient << ": " << delivery_error
-                  << '\n';
-      } else {
-        adjust_redis_unread_best_effort(recipient, "group", -1);
-      }
-    });
+    // 在线实时发送时不再 Redis +1/-1；只有离线才累加未读缓存。
+    adjust_redis_unread_best_effort(recipient, "group", 1);
   }
 }
 
@@ -1855,8 +1980,8 @@ void ChatServer::handle_history_group(const TcpConnectionPtr &connection,
   const std::vector<std::string> words = split_words(arguments);
 
   if (words.empty() || words.size() > 2U || !is_valid_group_name(words[0])) {
-    connection->send("[error] usage: HISTORY_GROUP "
-                     "<group_name> [count]\n");
+    connection->send("[error] 用法：HISTORY_GROUP "
+                     "<群名称> [条数]\n");
     return;
   }
 
@@ -1864,7 +1989,7 @@ void ChatServer::handle_history_group(const TcpConnectionPtr &connection,
 
   if (words.size() == 2U &&
       !parse_count(words[1], 1U, kMaxHistoryCount, count)) {
-    connection->send("[error] HISTORY_GROUP count must be 1-100.\n");
+    connection->send("[error] 群历史条数必须在 1-100 之间。\n");
     return;
   }
 
@@ -1877,7 +2002,7 @@ void ChatServer::handle_history_group(const TcpConnectionPtr &connection,
   }
 
   if (!role) {
-    connection->send("[error] only group members can view "
+    connection->send("[error] 只有群成员可以查看该内容。"
                      "group history.\n");
     return;
   }
@@ -2005,7 +2130,7 @@ void ChatServer::handle_file_begin_private(const TcpConnectionPtr &connection,
 
         if (decision == DirectMessageDecision::DatabaseError) {
             reject_file_upload(connection, session, token,
-                               "database error while checking direct-file policy");
+                               "数据库操作出错：checking direct-file policy");
             return;
         }
 
@@ -2023,7 +2148,7 @@ void ChatServer::handle_file_begin_private(const TcpConnectionPtr &connection,
 
         if (decision == DirectMessageDecision::BlockedByRecipient) {
             reject_file_upload(connection, session, token,
-                               "recipient has blocked you");
+                               "recipient 有 blocked you");
             return;
         }
 
@@ -2163,7 +2288,7 @@ void ChatServer::handle_file_begin_group(const TcpConnectionPtr &connection,
   if (!database_.get_group(group_name, group, error) ||
       !database_.get_group_role(group_name, session.username, role, error)) {
     reject_file_upload(connection, session, token,
-                       "database error while checking group membership");
+                       "数据库操作出错：checking group membership");
     return;
   }
 
@@ -2182,7 +2307,7 @@ void ChatServer::handle_file_begin_group(const TcpConnectionPtr &connection,
 
   if (!database_.list_group_member_usernames(group_name, members, error)) {
     reject_file_upload(connection, session, token,
-                       "database error while loading group members");
+                       "数据库操作出错：loading group members");
     return;
   }
 
@@ -2197,7 +2322,7 @@ void ChatServer::handle_file_begin_group(const TcpConnectionPtr &connection,
 
   if (current_recipients.empty()) {
     reject_file_upload(connection, session, token,
-                       "group has no other members to receive the file");
+                       "group 有 no other members to receive the file");
     return;
   }
 
@@ -2302,8 +2427,10 @@ void ChatServer::handle_file_chunk(const TcpConnectionPtr &connection,
 
   PendingBinaryUploadFrame frame;
   frame.token = token;
+  frame.start_offset = offset;
   frame.next_offset = offset;
   frame.remaining_bytes = byte_count;
+  frame.bytes.reserve(static_cast<std::size_t>(byte_count));
 
   session.binary_upload = std::move(frame);
 }
@@ -2328,7 +2455,7 @@ void ChatServer::handle_file_end(const TcpConnectionPtr &connection,
   if (session.upload->received_size != session.upload->expected_size) {
     pause_file_upload(
         connection, session, token,
-        "uploaded byte count is incomplete; resume from server offset");
+        "uploaded byte count is incomplete; resume，来源：server offset");
     return;
   }
 
@@ -2350,22 +2477,63 @@ void ChatServer::handle_file_end(const TcpConnectionPtr &connection,
 
         std::string reason;
         if (decision == DirectMessageDecision::BlockedByRecipient) {
-            reason = "recipient has blocked you";
+            reason = "接收方已屏蔽你";
         } else if (decision == DirectMessageDecision::BlockedBySender) {    // 新增
-            reason = "you have blocked the recipient";
+            reason = "你已屏蔽接收方";
         } else if (decision == DirectMessageDecision::NotFriends) {
-            reason = "recipient is no longer your friend";
+            reason = "接收方已不再是你的好友";
         } else if (decision == DirectMessageDecision::TargetMissing) {
-            reason = "recipient account no longer exists";
+            reason = "接收方账户已不存在";
         } else {
-            reason = "permission changed during upload";
+            reason = "上传过程中权限发生变化";
         }
 
         connection->send("FILE_REJECT " + token + " " +
                          encode_text_token(reason) + "\n");
         return;
     }
-}
+  } else if (upload.scope == chatroom::v9::FILE_TRANSFER_GROUP) {
+    // 群文件从 FILE_BEGIN 到 FILE_END 期间成员关系可能已经变化。
+    // 不能继续使用开始上传时的成员快照，否则被踢成员仍可能成为收件人。
+    std::lock_guard<std::mutex> operation_lock(group_operation_mutex_);
+
+    std::optional<GroupRole> sender_role;
+    std::vector<std::string> current_members;
+    if (!database_.get_group_role(upload.target, session.username, sender_role,
+                                  error) ||
+        !database_.list_group_member_usernames(upload.target, current_members,
+                                               error)) {
+      file_transfer_service_.cancel_upload(upload.token);
+      connection->send("FILE_REJECT " + token + " " +
+                       encode_text_token(
+                           "重新检查群成员权限时数据库出错") +
+                       "\n");
+      return;
+    }
+
+    if (!sender_role) {
+      file_transfer_service_.cancel_upload(upload.token);
+      connection->send("FILE_REJECT " + token + " " +
+                       encode_text_token(
+                           "你已不再是该群成员") +
+                       "\n");
+      return;
+    }
+
+    upload.recipients.clear();
+    for (const std::string &member : current_members) {
+      if (member != session.username) upload.recipients.push_back(member);
+    }
+
+    if (upload.recipients.empty()) {
+      file_transfer_service_.cancel_upload(upload.token);
+      connection->send("FILE_REJECT " + token + " " +
+                       encode_text_token(
+                           "当前群内没有其他可接收该文件的成员") +
+                       "\n");
+      return;
+    }
+  }
 
   if (!file_transfer_service_.finalize_upload(
           upload.temp_path, upload.token, upload.file_name,
@@ -2398,7 +2566,7 @@ void ChatServer::handle_file_end(const TcpConnectionPtr &connection,
 
     connection->send(
         "FILE_REJECT " + token + " " +
-        encode_text_token("database failed to persist file transfer") + "\n");
+        encode_text_token("数据库未能保存文件传输记录") + "\n");
     return;
   }
 
@@ -2413,11 +2581,10 @@ void ChatServer::handle_file_end(const TcpConnectionPtr &connection,
   connection->send("FILE_UPLOAD_OK " + token + " " +
                    std::to_string(transfer_id) + "\n");
 
-  connection->send("[file #F" + std::to_string(transfer_id) + "] stored " +
-                   upload.file_name + " (" +
+  connection->send("[file #F" + std::to_string(transfer_id) + "] 已保存 " +
+                   upload.file_name + "（" +
                    std::to_string(upload.expected_size) +
-                   " bytes). Online recipients receive it now; "
-                   "offline recipients receive it after login.\n");
+                   " 字节）。在线接收方会立即收到，离线接收方登录后接收。\n");
 
   StoredFileTransfer stored;
   stored.id = transfer_id;
@@ -2447,7 +2614,7 @@ void ChatServer::handle_file_abort(const TcpConnectionPtr &connection,
   // checkpoint. Only the connection that currently owns that validated
   // upload session may explicitly cancel it.
   if (!session.upload || session.upload->token != token) {
-    connection->send("[error] no matching active upload to cancel.\n");
+    connection->send("[error] 没有匹配的活动上传任务可取消。\n");
     return;
   }
 
@@ -2473,22 +2640,43 @@ void ChatServer::handle_file_resume_request(const TcpConnectionPtr &connection,
 
   if (words.size() != 2U || !parse_uint64_value(words[0], transfer_id) ||
       !parse_uint64_value(words[1], start_offset)) {
-    connection->send("[error] invalid FILE_RESUME_REQUEST.\n");
+    connection->send("[error] 文件断点续传请求无效。\n");
     return;
   }
 
   const auto offered = session.offered_files.find(transfer_id);
 
   if (offered == session.offered_files.end()) {
-    connection->send("[error] file #F" + std::to_string(transfer_id) +
-                     " is not currently offered; use command 37.\n");
+    connection->send("[error] 文件 #F" + std::to_string(transfer_id) +
+                     " 当前不在可接收列表中，请使用数字命令 37 重新拉取。\n");
     return;
+  }
+
+  // 群文件真正开始下行前再检查一次成员身份。这样即使 FILE_OFFER 已经
+  // 发到客户端，只要随后被移出群，就不会因为旧 offer 继续拿到文件。
+  if (offered->second.metadata.scope() == chatroom::v9::FILE_TRANSFER_GROUP) {
+    std::optional<GroupRole> role;
+    std::string membership_error;
+    if (!database_.get_group_role(offered->second.metadata.group_name(),
+                                  session.username, role, membership_error)) {
+      connection->send("[error] 重新检查群文件成员权限失败，文件 #F" +
+                       std::to_string(transfer_id) + ".\n");
+      return;
+    }
+    if (!role) {
+      session.offered_files.erase(offered);
+      connection->send("FILE_ACCESS_REVOKED " +
+                       std::to_string(transfer_id) + " " +
+                       encode_text_token(
+                           "你已不再是该群成员") +
+                       "\n");
+      return;
+    }
   }
 
   if (start_offset > offered->second.metadata.file_size()) {
     connection->send(
-        "[error] resume offset exceeds file size; "
-        "client should discard the partial file and retry from 0.\n");
+        "[error] 断点位置超过文件大小；客户端应删除本地临时文件并从 0 重新接收。\n");
     return;
   }
 
@@ -2498,8 +2686,12 @@ void ChatServer::handle_file_resume_request(const TcpConnectionPtr &connection,
 
   const StoredFileTransfer transfer = offered->second;
 
+  auto cancel_flag = std::make_shared<std::atomic_bool>(false);
+  session.file_delivery_cancel_flags[transfer_id] = cancel_flag;
+
   file_transfer_service_.deliver_async(
       transfer.id, transfer.metadata, start_offset, connection,
+      [cancel_flag] { return !cancel_flag->load(); },
       [this, transfer_id, recipient = session.username,
        weak_connection = std::weak_ptr<minimuduo::net::TcpConnection>(
            connection)](bool success, const std::string &delivery_error) {
@@ -2512,18 +2704,23 @@ void ChatServer::handle_file_resume_request(const TcpConnectionPtr &connection,
         const TcpConnectionPtr current = weak_connection.lock();
 
         if (current != nullptr) {
-          current->getLoop()->queueInLoop([this, current, transfer_id] {
+          current->getLoop()->queueInLoop(
+              [this, current, transfer_id, delivery_error] {
             const std::shared_ptr<ClientSession> current_session =
                 session_of(current);
 
             if (current_session != nullptr) {
               current_session->file_deliveries_in_progress.erase(transfer_id);
+              current_session->file_delivery_cancel_flags.erase(transfer_id);
+              if (delivery_error == "delivery permission revoked") {
+                current_session->offered_files.erase(transfer_id);
+              }
             }
           });
         }
 
-        std::cerr << "resumed file transfer #" << transfer_id << " to "
-                  << recipient << " failed: " << delivery_error << '\n';
+        std::cerr << "恢复文件传输 #" << transfer_id << " 给 "
+                  << recipient << " 失败：" << delivery_error << '\n';
       });
 }
 
@@ -2540,7 +2737,7 @@ void ChatServer::handle_file_received(const TcpConnectionPtr &connection,
 
   if (words.size() != 2U || !parse_uint64_value(words[0], transfer_id) ||
       !fileutil::is_valid_sha256_hex(words[1])) {
-    connection->send("[error] invalid FILE_RECEIVED acknowledgement.\n");
+    connection->send("[error] 文件接收确认格式无效。\n");
     return;
   }
 
@@ -2556,6 +2753,7 @@ void ChatServer::handle_file_received(const TcpConnectionPtr &connection,
 
   if (!transfer) {
     session.file_deliveries_in_progress.erase(transfer_id);
+    session.file_delivery_cancel_flags.erase(transfer_id);
 
     session.offered_files.erase(transfer_id);
 
@@ -2571,8 +2769,9 @@ void ChatServer::handle_file_received(const TcpConnectionPtr &connection,
 
   if (received_sha != transfer->metadata.sha256_hex()) {
     session.file_deliveries_in_progress.erase(transfer_id);
+    session.file_delivery_cancel_flags.erase(transfer_id);
 
-    connection->send("[error] file SHA-256 acknowledgement mismatch; "
+    connection->send("[error] 文件 SHA-256 接收确认不匹配；"
                      "the file remains pending for retry.\n");
     return;
   }
@@ -2584,6 +2783,7 @@ void ChatServer::handle_file_received(const TcpConnectionPtr &connection,
   }
 
   session.file_deliveries_in_progress.erase(transfer_id);
+  session.file_delivery_cancel_flags.erase(transfer_id);
 
   session.offered_files.erase(transfer_id);
 
@@ -2609,8 +2809,9 @@ void ChatServer::handle_file_receive_failed(const TcpConnectionPtr &connection,
   }
 
   session.file_deliveries_in_progress.erase(transfer_id);
+  session.file_delivery_cancel_flags.erase(transfer_id);
 
-  connection->send("[system] file #F" + std::to_string(transfer_id) +
+  connection->send("[system] 文件 #F" + std::to_string(transfer_id) +
                    " remains pending; use command 37 to retry/resume.\n");
 }
 
@@ -2622,15 +2823,15 @@ void ChatServer::deliver_pending_files(const TcpConnectionPtr &connection,
 
   if (!database_.pending_file_transfers(username, kOfflineFileDeliveryBatch,
                                         transfers, error)) {
-    std::cerr << "failed to load pending files for " << username << ": "
+    std::cerr << "加载待处理文件失败，用户：" << username << ": "
               << error << '\n';
     return;
   }
 
   if (!transfers.empty()) {
-    connection->send("[system] offering " + std::to_string(transfers.size()) +
+    connection->send("[system] 正在提供 " + std::to_string(transfers.size()) +
                      " pending file(s); local partial files "
-                     "will resume from their saved offsets.\n");
+                     "will resume，来源：their saved offsets.\n");
   }
 
   for (const StoredFileTransfer &transfer : transfers) {
@@ -2638,7 +2839,7 @@ void ChatServer::deliver_pending_files(const TcpConnectionPtr &connection,
   }
 
   if (transfers.size() == kOfflineFileDeliveryBatch) {
-    connection->send("[system] more pending files may remain; "
+    connection->send("[system] 可能还有待接收文件；"
                      "use command 37 again after current downloads finish.\n");
   }
 }
@@ -2667,13 +2868,25 @@ void ChatServer::deliver_file_to_user(const StoredFileTransfer &transfer,
     if (!database_.is_friend_blocked(recipient,
                                      transfer.metadata.sender_username(),
                                      blocked, block_error)) {
-      std::cerr << "failed to check file block policy for #F" << transfer.id
+      std::cerr << "检查文件屏蔽策略失败，文件 #F" << transfer.id
                 << ": " << block_error << '\n';
 
       return;
     }
 
     if (blocked) {
+      return;
+    }
+  } else if (transfer.metadata.scope() == chatroom::v9::FILE_TRANSFER_GROUP) {
+    std::optional<GroupRole> role;
+    std::string membership_error;
+    if (!database_.get_group_role(transfer.metadata.group_name(), recipient,
+                                  role, membership_error)) {
+      std::cerr << "检查群文件成员权限失败，文件 #F"
+                << transfer.id << ": " << membership_error << '\n';
+      return;
+    }
+    if (!role) {
       return;
     }
   }
@@ -2736,7 +2949,8 @@ bool ChatServer::require_login(const TcpConnectionPtr &connection,
     return true;
   }
 
-  connection->send("[error] you must LOGIN before " + action + ".\n");
+  (void)action;
+  connection->send("[error] 请先登录后再执行该操作。\n");
 
   return false;
 }
@@ -2748,7 +2962,7 @@ bool ChatServer::extract_single_username(const TcpConnectionPtr &connection,
   const std::vector<std::string> words = split_words(arguments);
 
   if (words.size() != 1U || !is_valid_username(words[0])) {
-    connection->send("[error] usage: " + usage + "\n");
+    connection->send("[error] 用法：" + usage + "\n");
     return false;
   }
 
@@ -2763,8 +2977,8 @@ bool ChatServer::extract_single_group_name(const TcpConnectionPtr &connection,
   const std::vector<std::string> words = split_words(arguments);
 
   if (words.size() != 1U || !is_valid_group_name(words[0])) {
-    connection->send("[error] usage: " + usage +
-                     "; group_name=2-32 letters/digits/_/-.\n");
+    connection->send("[error] 用法：" + usage +
+                     "；群名称长度 2-32，只能包含字母、数字、下划线或短横线。\n");
     return false;
   }
 
@@ -2781,7 +2995,7 @@ bool ChatServer::extract_group_and_username(const TcpConnectionPtr &connection,
 
   if (words.size() != 2U || !is_valid_group_name(words[0]) ||
       !is_valid_username(words[1])) {
-    connection->send("[error] usage: " + usage + "\n");
+    connection->send("[error] 用法：" + usage + "\n");
     return false;
   }
 
@@ -2835,13 +3049,13 @@ void ChatServer::notify_pending_requests(const TcpConnectionPtr &connection,
 
   if (database_.list_incoming_requests(username, pending_friends, error)) {
     if (!pending_friends.empty()) {
-      connection->send("[system] you have " +
+      connection->send("[system] 你有 " +
                        std::to_string(pending_friends.size()) +
                        " pending friend request(s). "
                        "Use command 16.\n");
     }
   } else {
-    std::cerr << "failed to load pending friend requests for " << username
+    std::cerr << "加载待处理好友申请失败，用户：" << username
               << ": " << error << '\n';
   }
 
@@ -2850,14 +3064,14 @@ void ChatServer::notify_pending_requests(const TcpConnectionPtr &connection,
   if (database_.list_managed_group_request_counts(username, group_requests,
                                                   error)) {
     for (const ManagedGroupRequestCount &request : group_requests) {
-      connection->send("[system] group " + request.group_name + " has " +
+      connection->send("[system] 群 " + request.group_name + " 有 " +
                        std::to_string(request.pending_count) +
                        " pending join request(s). "
                        "Use command 32 for group requests: 32 " +
                        request.group_name + ".\n");
     }
   } else {
-    std::cerr << "failed to load managed group requests for " << username
+    std::cerr << "加载可管理群的入群申请失败，用户：" << username
               << ": " << error << '\n';
   }
 }
@@ -2869,13 +3083,13 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
 
   if (!database_.pending_private_messages(username, kOfflineDeliveryBatch,
                                           private_messages, error)) {
-    std::cerr << "failed to load offline private messages for " << username
+    std::cerr << "加载离线私聊消息失败，用户：" << username
               << ": " << error << '\n';
   } else {
     if (!private_messages.empty()) {
-      connection->send("[system] delivering " +
+      connection->send("[system] 正在投递 " +
                        std::to_string(private_messages.size()) +
-                       " offline private message(s).\n");
+                       " 条离线私聊消息。\n");
     }
 
     for (const StoredMessage &message : private_messages) {
@@ -2885,7 +3099,7 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
       if (!database_.is_friend_blocked(username,
                                        message.payload.sender_username(),
                                        blocked, block_error)) {
-        std::cerr << "failed to recheck offline private block for #"
+        std::cerr << "离线私聊投递前检查屏蔽关系失败，消息 #"
                   << message.id << ": " << block_error << '\n';
 
         continue;
@@ -2900,20 +3114,14 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
               message.payload.sender_username() + "] " +
               encode_text_token(message.payload.content()) + "\n",
           [this, message_id = message.id, username] {
-            std::string mark_error;
-            if (!database_.mark_private_message_delivered(
-                    message_id, username, now_unix_ms(), mark_error)) {
-              std::cerr << "failed to mark offline private #" << message_id
-                        << " delivered: " << mark_error << '\n';
-            } else {
-              adjust_redis_unread_best_effort(username, "private", -1);
-            }
+            enqueue_delivery_persist(DeliveryPersistKind::Private,
+                                     message_id, username, true);
           });
     }
 
     if (private_messages.size() == kOfflineDeliveryBatch) {
-      connection->send("[system] more offline private messages may remain; "
-                       "use command 37 again.\n");
+      connection->send("[system] 可能还有离线私聊消息；"
+                       "请再次使用数字命令 37。\n");
     }
   }
 
@@ -2921,15 +3129,15 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
 
   if (!database_.pending_group_messages(username, kOfflineDeliveryBatch,
                                         group_messages, error)) {
-    std::cerr << "failed to load offline group messages for " << username
+    std::cerr << "加载离线群消息失败，用户：" << username
               << ": " << error << '\n';
     return;
   }
 
   if (!group_messages.empty()) {
-    connection->send("[system] delivering " +
+    connection->send("[system] 正在投递 " +
                      std::to_string(group_messages.size()) +
-                     " offline group message(s).\n");
+                     " 条离线群消息。\n");
   }
 
   for (const StoredGroupMessage &message : group_messages) {
@@ -2939,20 +3147,14 @@ void ChatServer::deliver_pending_messages(const TcpConnectionPtr &connection,
             message.payload.sender_username() + "] " +
             encode_text_token(message.payload.content()) + "\n",
         [this, message_id = message.id, username] {
-          std::string mark_error;
-          if (!database_.mark_group_message_delivered(
-                  message_id, username, now_unix_ms(), mark_error)) {
-            std::cerr << "failed to mark offline group #" << message_id
-                      << " delivered: " << mark_error << '\n';
-          } else {
-            adjust_redis_unread_best_effort(username, "group", -1);
-          }
+          enqueue_delivery_persist(DeliveryPersistKind::Group,
+                                   message_id, username, true);
         });
   }
 
   if (group_messages.size() == kOfflineDeliveryBatch) {
-    connection->send("[system] more offline group messages may remain; "
-                     "use command 37 again.\n");
+    connection->send("[system] 可能还有离线群消息；"
+                     "请再次使用数字命令 37。\n");
   }
 }
 
@@ -2963,7 +3165,7 @@ void ChatServer::notify_group_managers(const std::string &group_name,
   std::string error;
 
   if (!database_.list_group_managers(group_name, managers, error)) {
-    std::cerr << "failed to load group managers for " << group_name << ": "
+    std::cerr << "加载群管理员失败，群：" << group_name << ": "
               << error << '\n';
     return;
   }
@@ -3056,11 +3258,11 @@ std::string ChatServer::join_names(const std::vector<std::string> &names) {
 std::string ChatServer::group_role_name(GroupRole role) {
   switch (role) {
   case GroupRole::Owner:
-    return "owner";
+    return "群主";
   case GroupRole::Admin:
-    return "admin";
+    return "管理员";
   case GroupRole::Member:
-    return "member";
+    return "成员";
   }
 
   return "unknown";
@@ -3068,6 +3270,64 @@ std::string ChatServer::group_role_name(GroupRole role) {
 
 bool ChatServer::is_group_manager(GroupRole role) {
   return role == GroupRole::Owner || role == GroupRole::Admin;
+}
+
+void ChatServer::enqueue_delivery_persist(DeliveryPersistKind kind,
+                                          std::uint64_t message_id,
+                                          std::string recipient,
+                                          bool decrement_unread) {
+  {
+    std::lock_guard<std::mutex> lock(delivery_persist_mutex_);
+    delivery_persist_queue_.push_back(
+        DeliveryPersistTask{kind, message_id, std::move(recipient),
+                            decrement_unread});
+  }
+  delivery_persist_cv_.notify_one();
+}
+
+void ChatServer::delivery_persist_loop() {
+  while (true) {
+    DeliveryPersistTask task;
+
+    {
+      std::unique_lock<std::mutex> lock(delivery_persist_mutex_);
+      delivery_persist_cv_.wait(lock, [this] {
+        return stopping_.load() || !delivery_persist_queue_.empty();
+      });
+
+      if (delivery_persist_queue_.empty()) {
+        if (stopping_.load()) break;
+        continue;
+      }
+
+      task = std::move(delivery_persist_queue_.front());
+      delivery_persist_queue_.pop_front();
+    }
+
+    std::string error;
+    bool ok = false;
+
+    if (task.kind == DeliveryPersistKind::Private) {
+      ok = database_.mark_private_message_delivered(
+          task.message_id, task.recipient, now_unix_ms(), error);
+    } else {
+      ok = database_.mark_group_message_delivered(
+          task.message_id, task.recipient, now_unix_ms(), error);
+    }
+
+    if (!ok) {
+      std::cerr << "后台更新消息投递状态失败，消息 #" << task.message_id
+                << "，接收者 " << task.recipient << "：" << error << '\n';
+      continue;
+    }
+
+    if (task.decrement_unread) {
+      adjust_redis_unread_best_effort(
+          task.recipient,
+          task.kind == DeliveryPersistKind::Private ? "private" : "group",
+          -1);
+    }
+  }
 }
 
 void ChatServer::presence_refresh_loop() {
@@ -3100,7 +3360,7 @@ void ChatServer::refresh_all_presence_best_effort() {
     if (!redis_.refresh_presence_if_owned(username, server_instance_id_,
                                           presence_ttl_seconds_, refreshed,
                                           error)) {
-      std::cerr << "Redis presence refresh failed for " << username << ": "
+      std::cerr << "Redis 在线状态刷新失败，用户：" << username << ": "
                 << error << '\n';
       continue;
     }
@@ -3112,10 +3372,10 @@ void ChatServer::refresh_all_presence_best_effort() {
     bool claimed = false;
     if (!redis_.claim_presence(username, server_instance_id_,
                                presence_ttl_seconds_, claimed, error)) {
-      std::cerr << "Redis presence reclaim failed for " << username << ": "
+      std::cerr << "Redis 在线状态回收失败，用户：" << username << ": "
                 << error << '\n';
     } else if (!claimed) {
-      std::cerr << "Redis presence ownership for " << username
+      std::cerr << "Redis 在线状态所有权异常，用户：" << username
                 << " belongs to another server_name. "
                 << "Check config/redis.conf server_name values.\n";
     }
@@ -3129,10 +3389,10 @@ bool ChatServer::claim_redis_presence(const std::string &username,
 
   if (!redis_.claim_presence(username, server_instance_id_,
                              presence_ttl_seconds_, claimed, error)) {
-    std::cerr << "Redis presence claim failed for " << username << ": " << error
+    std::cerr << "Redis 在线状态占用失败，用户：" << username << ": " << error
               << '\n';
 
-    connection->send("[error] Redis presence service is unavailable; "
+    connection->send("[error] Redis 在线状态服务不可用；"
                      "login cannot complete.\n");
     return false;
   }
@@ -3143,10 +3403,10 @@ bool ChatServer::claim_redis_presence(const std::string &username,
 
   std::optional<std::string> owner;
   if (!redis_.presence_owner(username, owner, error)) {
-    std::cerr << "Redis presence lookup failed for " << username << ": "
+    std::cerr << "Redis 在线状态查询失败，用户：" << username << ": "
               << error << '\n';
 
-    connection->send("[error] Redis presence service is unavailable; "
+    connection->send("[error] Redis 在线状态服务不可用；"
                      "login cannot complete.\n");
     return false;
   }
@@ -3158,10 +3418,10 @@ bool ChatServer::claim_redis_presence(const std::string &username,
                                           presence_ttl_seconds_, refreshed,
                                           error) ||
         !refreshed) {
-      std::cerr << "Redis presence refresh failed for " << username << ": "
+      std::cerr << "Redis 在线状态刷新失败，用户：" << username << ": "
                 << error << '\n';
 
-      connection->send("[error] Redis presence refresh failed; "
+      connection->send("[error] Redis 在线状态刷新失败；"
                        "login cannot complete.\n");
       return false;
     }
@@ -3169,7 +3429,7 @@ bool ChatServer::claim_redis_presence(const std::string &username,
     return true;
   }
 
-  connection->send("[error] this account is already online "
+  connection->send("[error] 该账号已经在线。"
                    "on another server instance.\n");
   return false;
 }
@@ -3181,7 +3441,7 @@ void ChatServer::remove_redis_presence_best_effort(
 
   if (!redis_.remove_presence_if_owned(username, server_instance_id_, removed,
                                        error)) {
-    std::cerr << "Redis presence cleanup failed for " << username << ": "
+    std::cerr << "Redis 在线状态清理失败，用户：" << username << ": "
               << error << '\n';
   }
 }
@@ -3193,7 +3453,7 @@ void ChatServer::adjust_redis_unread_best_effort(const std::string &username,
   std::string error;
 
   if (!redis_.adjust_unread(username, kind, delta, result, error)) {
-    std::cerr << "Redis unread update failed for " << username
+    std::cerr << "Redis 未读状态更新失败，用户：" << username
               << " kind=" << kind << ": " << error << '\n';
   }
 }
@@ -3204,7 +3464,7 @@ void ChatServer::send_redis_unread_summary_best_effort(
   std::string error;
 
   if (!redis_.unread_counts(username, counts, error)) {
-    std::cerr << "Redis unread lookup failed for " << username << ": " << error
+    std::cerr << "Redis 未读状态查询失败，用户：" << username << ": " << error
               << '\n';
     return;
   }
@@ -3215,23 +3475,21 @@ void ChatServer::send_redis_unread_summary_best_effort(
   }
 
   connection->send(
-      "[system] Redis unread cache: private_messages=" +
+      "[system] Redis 未读缓存：私聊消息=" +
       std::to_string(counts.private_messages) +
-      ", group_messages=" + std::to_string(counts.group_messages) +
-      ", private_files=" + std::to_string(counts.private_files) +
-      ", group_files=" + std::to_string(counts.group_files) +
-      ". Durable delivery/filtering still comes from MySQL; "
-      "this Redis cache can temporarily include direct items held by "
-      "BLOCK_FRIEND.\n");
+      "，群消息=" + std::to_string(counts.group_messages) +
+      "，私聊文件=" + std::to_string(counts.private_files) +
+      "，群文件=" + std::to_string(counts.group_files) +
+      "。最终持久化投递状态仍以 MySQL 为准。\n");
 }
 
 void ChatServer::database_error(const TcpConnectionPtr &connection,
                                 const std::string &operation,
                                 const std::string &error) const {
-  spdlog::error("database operation failed: {}: {}", operation, error);
+  (void)operation;
+  spdlog::error("数据库操作失败：{}", error);
 
-  std::cerr << "database error while " << operation << ": " << error << '\n';
+  std::cerr << "数据库操作失败：" << error << '\n';
 
-  connection->send("[error] database operation failed while " + operation +
-                   ".\n");
+  connection->send("[error] 数据库操作失败：" + error + "\n");
 }

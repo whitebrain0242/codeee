@@ -25,7 +25,7 @@ bool send_all(TlsClientTransport &transport, const std::string &data) {
     return true;
   }
 
-  std::cerr << "TLS send failed: " << error << '\n';
+  std::cerr << "TLS 发送失败：" << error << '\n';
 
   return false;
 }
@@ -42,6 +42,7 @@ pending_upload_from_local(const LocalPendingUpload &local) {
   upload.file_name = local.file_name;
   upload.file_size = local.file_size;
   upload.sha256_hex = local.sha256_hex;
+  upload.source_sha_verified = false;
   upload.created_at_unix_ms = local.created_at_unix_ms;
   return upload;
 }
@@ -62,12 +63,12 @@ local_pending_upload(const PendingUpload &upload,//上传前文件数据
   return local;
 }
 //对于要上传的任务有没有修改
-static bool upload_source_matches(const PendingUpload &upload,
+static bool upload_source_matches(PendingUpload &upload,
                                   std::string &error) {
   std::error_code filesystem_error;
   //检查路径是否指向一个普通文件（不是目录、符号链接、设备文件等）
   if (!std::filesystem::is_regular_file(upload.source_path, filesystem_error)) {
-    error = "upload source file is missing";
+    error = "上传源文件不存在";
     return false;
   }
   //获取文件当前大小
@@ -75,24 +76,27 @@ static bool upload_source_matches(const PendingUpload &upload,
       std::filesystem::file_size(upload.source_path, filesystem_error));
 
   if (filesystem_error) {
-    error = "cannot inspect upload source size: " + filesystem_error.message();
+    error = "无法读取上传源文件大小：" + filesystem_error.message();
     return false;
   }
   //比较当前获取文件大小和上传前记录的大小
   if (size != upload.file_size) {
-    error = "upload source size changed since task was saved";
+    error = "上传源文件大小与保存任务时不一致";
     return false;
   }
-  //计算哈希是否匹配
-  std::string current_sha;
+  // 新建上传在 prepare_upload() 已经计算过一次 SHA-256。
+  // 不再在刚入队时立刻重复扫描整个大文件；只有从 SQLite 恢复的任务才重算。
+  if (!upload.source_sha_verified) {
+    std::string current_sha;
+    if (!fileutil::sha256_file_hex(upload.source_path, current_sha, error)) {
+      return false;
+    }
 
-  if (!fileutil::sha256_file_hex(upload.source_path, current_sha, error)) {
-    return false;
-  }
-
-  if (current_sha != upload.sha256_hex) {
-    error = "upload source SHA-256 changed since task was saved";
-    return false;
+    if (current_sha != upload.sha256_hex) {
+      error = "上传源文件的 SHA-256 与保存任务时不一致";
+      return false;
+    }
+    upload.source_sha_verified = true;
   }
 
   return true;
@@ -129,7 +133,7 @@ static bool start_next_queued_upload(TlsClientTransport &transport,
     std::string error;
 
     if (!upload_source_matches(iterator->second, error)) {
-      std::cerr << "[resume] dropping pending upload " << token << ": " << error
+      std::cerr << "[断点续传] 丢弃无效的待上传任务 " << token << ": " << error
                 << '\n';
 
       std::string sqlite_error;
@@ -148,8 +152,8 @@ static bool start_next_queued_upload(TlsClientTransport &transport,
       return false;
     }
 
-    std::cout << "[resume] requesting server checkpoint for "
-              << iterator->second.file_name << " token=" << token << ".\n";
+    std::cout << "[断点续传] 正在向服务端请求断点："
+              << iterator->second.file_name << "，令牌=" << token << ".\n";
 
     return true;
   }
@@ -164,7 +168,7 @@ bool load_and_resume_pending_uploads(TlsClientTransport &transport,
   std::string error;
 
   if (!cache.list_pending_uploads(state.active_username, saved, error)) {
-    std::cerr << "[local sqlite error] cannot load pending uploads: " << error
+    std::cerr << "[本地 SQLite 错误] 无法加载待上传任务：" << error
               << '\n';
     return true;
   }
@@ -182,8 +186,8 @@ bool load_and_resume_pending_uploads(TlsClientTransport &transport,
   }
 
   if (!saved.empty()) {
-    std::cout << "[resume] found " << saved.size()
-              << " pending upload task(s) in SQLite.\n";
+    std::cout << "[断点续传] 找到 " << saved.size()
+              << " 个 SQLite 待上传任务。\n";
   }
 
   return start_next_queued_upload(transport, state, cache);
@@ -203,8 +207,7 @@ bool prepare_upload(TlsClientTransport &transport, ClientState &state,
 
   if (source_path.empty() ||
       !std::filesystem::is_regular_file(source_path, filesystem_error)) {
-    std::cout << "[local error] file does not exist or "
-                 "is not a regular file.\n";
+    std::cout << "[本地错误] 文件不存在，或者目标不是普通文件。\n";
     return true;
   }
 
@@ -212,14 +215,13 @@ bool prepare_upload(TlsClientTransport &transport, ClientState &state,
       std::filesystem::file_size(source_path, filesystem_error));
 
   if (filesystem_error) {
-    std::cout << "[local error] cannot read file size: "
+    std::cout << "[本地错误] 无法读取文件大小："
               << filesystem_error.message() << '\n';
     return true;
   }
 
   if (file_size > kMaxFileSize) {
-    std::cout << "[local error] file exceeds 20 MiB "
-                 "course-project limit.\n";
+    std::cout << "[本地错误] 文件超过客户端允许的最大文件大小。\n";
     return true;
   }
 
@@ -227,15 +229,14 @@ bool prepare_upload(TlsClientTransport &transport, ClientState &state,
   std::string error;
 
   if (!fileutil::sha256_file_hex(source_path, sha256_hex, error)) {
-    std::cout << "[local error] " << error << '\n';
+    std::cout << "[本地错误] " << error << '\n';
     return true;
   }
 
   const std::string token = fileutil::make_transfer_token();
 
   if (token.empty()) {
-    std::cout << "[local error] failed to create "
-                 "secure transfer token.\n";
+    std::cout << "[本地错误] 无法生成安全的文件传输令牌。\n";
     return true;
   }
 
@@ -248,11 +249,12 @@ bool prepare_upload(TlsClientTransport &transport, ClientState &state,
       fileutil::sanitize_filename(source_path.filename().string());
   upload.file_size = file_size;
   upload.sha256_hex = sha256_hex;
+  upload.source_sha_verified = true;
   upload.created_at_unix_ms = client_now_unix_ms();
 
   if (!cache.save_pending_upload(
           local_pending_upload(upload, state.active_username), error)) {
-    std::cout << "[local sqlite error] cannot persist resumable upload task: "
+    std::cout << "[本地 SQLite 错误] 无法保存断点续传任务："
               << error << '\n';
     return true;
   }
@@ -261,10 +263,10 @@ bool prepare_upload(TlsClientTransport &transport, ClientState &state,
 
   state.upload_queue.push_back(token);
 
-  std::cout << "[local] queued resumable " << scope << " upload "
+  std::cout << "[本地] 已加入断点续传上传队列：" << scope << " 上传 "
             << upload.file_name << " (" << upload.file_size
-            << " bytes, SHA-256 " << upload.sha256_hex << ", token " << token
-            << ").\n";
+            << " 字节，SHA-256 " << upload.sha256_hex << "，传输令牌 " << token
+            << "）。\n";
 
   return start_next_queued_upload(transport, state, cache);
 }
@@ -274,7 +276,7 @@ static bool send_upload_data(TlsClientTransport &transport,
                              std::uint64_t start_offset) {
   if (start_offset > upload.file_size) {
     std::cerr
-        << "[local file error] server resume offset exceeds local file size.\n";
+        << "[本地文件错误] 服务端断点位置超过本地文件大小。\n";
     return false;
   }
 
@@ -297,13 +299,13 @@ static bool send_upload_data(TlsClientTransport &transport,
 
     if (!transport.send_file(upload.source_path, offset, frame_size,
                              used_zero_copy, error)) {
-      std::cerr << "[local file error] raw file send failed: " << error << '\n';
+      std::cerr << "[本地文件错误] 原始文件数据发送失败：" << error << '\n';
       return false;
     }
 
     if (!reported_mode) {
-      std::cout << "[file transport] "
-                << (used_zero_copy ? "kTLS SSL_sendfile zero-copy enabled"
+      std::cout << "[文件传输] "
+                << (used_zero_copy ? "已启用 kTLS SSL_sendfile 零拷贝"
                                    : "raw binary streaming fallback "
                                      "(kTLS zero-copy unavailable)")
                 << ".\n";
@@ -339,7 +341,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
 
   if (!decode_text_token(words[3], group_name, error) ||
       !decode_text_token(words[4], file_name, error)) {
-    std::cerr << "[file error] invalid FILE_OFFER text token: " << error
+    std::cerr << "[文件错误] FILE_OFFER 文本字段无效：" << error
               << '\n';
     return false;
   }
@@ -352,7 +354,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
   std::filesystem::create_directories(account_dir, filesystem_error);
 
   if (filesystem_error) {
-    std::cerr << "[file error] cannot create download directory: "
+    std::cerr << "[文件错误] 无法创建下载目录："
               << filesystem_error.message() << '\n';
     return false;
   }
@@ -392,7 +394,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
                                       std::to_string(transfer_id) + " " +
                                       final_sha + "\n");
 
-        std::cout << "[resume] #F" << transfer_id
+        std::cout << "[断点续传] #F" << transfer_id
                   << " already exists and verifies locally; "
                      "re-sent FILE_RECEIVED acknowledgement.\n";
 
@@ -405,7 +407,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
 
   if (!cache.get_partial_download(state.active_username, transfer_id,
                                   saved_partial, error)) {
-    std::cerr << "[local sqlite error] cannot load partial download #F"
+    std::cerr << "[本地 SQLite 错误] 无法加载未完成下载 #F"
               << transfer_id << ": " << error << '\n';
     return false;
   }
@@ -437,7 +439,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
                          std::ios::binary | std::ios::trunc);
 
     if (!output) {
-      std::cerr << "[file error] cannot create " << download.temp_path << '\n';
+      std::cerr << "[文件错误] 无法创建 " << download.temp_path << '\n';
       return false;
     }
   } else if (!std::filesystem::exists(download.temp_path, filesystem_error)) {
@@ -445,7 +447,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
                          std::ios::binary | std::ios::trunc);
 
     if (!output) {
-      std::cerr << "[file error] cannot recreate " << download.temp_path
+      std::cerr << "[文件错误] 无法重新创建 " << download.temp_path
                 << '\n';
       return false;
     }
@@ -460,7 +462,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
     std::ofstream reset(download.temp_path, std::ios::binary | std::ios::trunc);
 
     if (!reset) {
-      std::cerr << "[file error] cannot reset invalid partial file.\n";
+      std::cerr << "[文件错误] 无法重置无效的临时文件。\n";
       return false;
     }
 
@@ -481,7 +483,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
   partial.sha256_hex = download.sha256_hex;
 
   if (!cache.save_partial_download(partial, error)) {
-    std::cerr << "[local sqlite error] cannot save partial download #F"
+    std::cerr << "[本地 SQLite 错误] 无法保存未完成下载 #F"
               << transfer_id << ": " << error << '\n';
     return false;
   }
@@ -494,7 +496,7 @@ static bool begin_incoming_download(TlsClientTransport &transport,
     return false;
   }
 
-  std::cout << "[file #F" << transfer_id << "] "
+  std::cout << "[文件 #F" << transfer_id << "] "
             << (download.received_size == 0U ? "starting" : "resuming") << " "
             << download.scope << " file " << download.file_name << " at offset "
             << download.received_size << "/" << download.expected_size << ".\n";
@@ -577,9 +579,9 @@ static bool finish_incoming_download(TlsClientTransport &transport,
   IncomingDownload download = iterator->second;
 
   if (download.received_size != download.expected_size) {
-    std::cerr << "[file error] #F" << transfer_id << " ended with "
+    std::cerr << "[文件错误] #F" << transfer_id << " 接收不完整："
               << download.received_size << "/" << download.expected_size
-              << " bytes; partial file is retained for resume.\n";
+              << " 字节；临时文件已保留，可用于断点续传。\n";
 
     (void)send_all(transport,
                    "FILE_RECEIVE_FAILED " + std::to_string(transfer_id) + "\n");
@@ -595,9 +597,8 @@ static bool finish_incoming_download(TlsClientTransport &transport,
   if (!fileutil::sha256_file_hex(download.temp_path, actual_sha256, error) ||
       actual_sha256 != download.sha256_hex) {
     std::cerr
-        << "[file error] #F" << transfer_id
-        << " SHA-256 verification failed; "
-           "corrupt partial is discarded so the next attempt starts at 0.\n";
+        << "[文件错误] #F" << transfer_id
+        << " SHA-256 校验失败；已删除损坏的临时文件，下次将从 0 开始。\n";
 
     std::error_code ignored;
 
@@ -625,9 +626,9 @@ static bool finish_incoming_download(TlsClientTransport &transport,
                           filesystem_error);
 
   if (filesystem_error) {
-    std::cerr << "[file error] cannot finalize #F" << transfer_id << ": "
+    std::cerr << "[文件错误] 无法完成文件 #F" << transfer_id << "："
               << filesystem_error.message()
-              << "; .part is retained for retry.\n";
+              << "；.part 临时文件已保留，后续可重试。\n";
 
     state.downloads.erase(iterator);
 
@@ -653,8 +654,8 @@ static bool finish_incoming_download(TlsClientTransport &transport,
   file.outgoing = false;
 
   if (!cache.cache_file_transfer(file, error)) {
-    std::cerr << "[local sqlite error] failed to cache #F" << transfer_id
-              << ": " << error << '\n';
+    std::cerr << "[本地 SQLite 错误] 无法缓存文件 #F" << transfer_id
+              << "：" << error << '\n';
   }
 
   std::string sqlite_error;
@@ -668,7 +669,7 @@ static bool finish_incoming_download(TlsClientTransport &transport,
     return false;
   }
 
-  std::cout << "[file #F" << transfer_id << "] received and SHA-256 verified: "
+  std::cout << "[文件 #F" << transfer_id << "] 已接收并通过 SHA-256 校验："
             << download.final_path.string() << '\n';
 
   return true;
@@ -696,13 +697,13 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
 
     state.active_upload_token = words[0];
 
-    std::cout << "[resume] server accepted upload checkpoint for "
-              << iterator->second.file_name << "; sending from offset "
-              << start_offset << "/" << iterator->second.file_size << ".\n";
+    std::cout << "[断点续传] 服务端已接受上传断点，文件："
+              << iterator->second.file_name << "；从偏移 "
+              << start_offset << "/" << iterator->second.file_size << " 开始发送。\n";
 
     if (!send_upload_data(transport, iterator->second, start_offset)) {
-      std::cerr << "[local file error] upload stream interrupted; "
-                   "SQLite task is retained for the next resume.\n";
+      std::cerr << "[本地文件错误] 上传数据流中断；SQLite 任务已保留，"
+                   "下次连接后可以继续断点续传。\n";
 
       state.active_upload_token.clear();
     }
@@ -718,16 +719,16 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
       std::string error;
 
       if (!decode_text_token(words[1], reason, error)) {
-        reason = "server paused file transfer";
+        reason = "服务端暂停了文件传输";
       }
 
       if (state.active_upload_token == words[0]) {
         state.active_upload_token.clear();
       }
 
-      std::cout << "[file paused] " << reason << "\n"
-                << "[resume] task remains in SQLite; "
-                   "reconnect/login to resume the saved upload task.\n";
+      std::cout << "[文件已暂停] " << reason << "\n"
+                << "[断点续传] task remains in SQLite; "
+                   "reconnect/login to resume the saved 上传 task.\n";
     }
 
     return true;
@@ -741,7 +742,7 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
       std::string error;
 
       if (!decode_text_token(words[1], reason, error)) {
-        reason = "server rejected file transfer";
+        reason = "服务端拒绝了文件传输";
       }
 
       if (!state.active_username.empty()) {
@@ -756,11 +757,63 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
         state.active_upload_token.clear();
       }
 
-      std::cout << "[file rejected] " << reason << '\n';
+      std::cout << "[文件被拒绝] " << reason << '\n';
 
       (void)start_next_queued_upload(transport, state, cache);
     }
 
+    return true;
+  }
+
+  if (command.name == "FILE_ACCESS_REVOKED") {
+    const std::vector<std::string> words = split_words(command.raw_arguments);
+    std::uint64_t transfer_id = 0U;
+    if (words.empty() || !parse_uint64(words[0], transfer_id)) return true;
+
+    std::string reason = "文件访问权限已被撤销";
+    if (words.size() >= 2U) {
+      std::string decode_error;
+      (void)decode_text_token(words[1], reason, decode_error);
+    }
+
+    const auto active = state.downloads.find(transfer_id);
+    if (active != state.downloads.end()) {
+      std::error_code ignored;
+      std::filesystem::remove(active->second.temp_path, ignored);
+      ignored.clear();
+      std::filesystem::remove(active->second.final_path, ignored);
+
+      if (!state.active_username.empty()) {
+        std::string sqlite_error;
+        (void)cache.remove_partial_download(state.active_username, transfer_id,
+                                            sqlite_error);
+      }
+      state.downloads.erase(active);
+    }
+
+    if (state.binary_download.transfer_id == transfer_id) {
+      state.binary_download = {};
+    }
+
+    const std::string prefix =
+        "FILE_OFFER " + std::to_string(transfer_id) + " ";
+    auto remove_queued_offer = [&prefix](auto &offers) {
+      for (auto map_it = offers.begin(); map_it != offers.end();) {
+        auto &lines = map_it->second;
+        lines.erase(std::remove_if(lines.begin(), lines.end(),
+                                   [&prefix](const std::string &queued) {
+                                     return starts_with(queued, prefix);
+                                   }),
+                    lines.end());
+        if (lines.empty()) map_it = offers.erase(map_it);
+        else ++map_it;
+      }
+    };
+    remove_queued_offer(state.pending_private_file_offers);
+    remove_queued_offer(state.pending_group_file_offers);
+
+    std::cout << "[文件 #F" << transfer_id << "] 访问权限已撤销：" << reason
+              << ". Partial/local copy removed.\n";
     return true;
   }
 
@@ -799,7 +852,7 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
     std::string error;
 
     if (!cache.cache_file_transfer(file, error)) {
-      std::cerr << "[local sqlite error] " << error << '\n';
+      std::cerr << "[本地 SQLite 错误] " << error << '\n';
     }
 
     std::string sqlite_error;
@@ -812,8 +865,8 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
       state.active_upload_token.clear();
     }
 
-    std::cout << "[file #F" << transfer_id
-              << "] upload persisted on server; resumable task cleared.\n";
+    std::cout << "[文件 #F" << transfer_id
+              << "] 上传 persisted on server; resumable task cleared.\n";
 
     (void)start_next_queued_upload(transport, state, cache);
 
@@ -823,8 +876,47 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
   if (command.name == "FILE_OFFER") {
     const std::vector<std::string> words = split_words(command.raw_arguments);
 
+    // 服务端这里只是在“提供文件”，真正的文件正文要等客户端发送
+    // FILE_RESUME_REQUEST 后才开始。利用这一点实现会话隔离：不在对应
+    // 私聊/群聊时只保存 offer，不提前下载文件。
+    if (words.size() == 7U && (words[1] == "PRIVATE" || words[1] == "GROUP")) {
+      std::string group_name;
+      std::string decode_error;
+      if (!decode_text_token(words[3], group_name, decode_error)) {
+        std::cerr << "[文件错误] FILE_OFFER 群字段无效。\n";
+        return true;
+      }
+
+      if (words[1] == "PRIVATE") {
+        const std::string &peer = words[2];
+        const bool matching_chat =
+            state.chat_scope == ClientChatScope::Private &&
+            state.chat_target == peer;
+        if (!matching_chat) {
+          state.pending_private_file_offers[peer].push_back(line);
+          if (state.private_file_unread_notified.insert(peer).second) {
+            std::cout << "[未读提示] 好友 " << peer
+                      << " 有待接收文件；进入与该好友的私聊后才开始接收。\n";
+          }
+          return true;
+        }
+      } else {
+        const bool matching_chat =
+            state.chat_scope == ClientChatScope::Group &&
+            state.chat_target == group_name;
+        if (!matching_chat) {
+          state.pending_group_file_offers[group_name].push_back(line);
+          if (state.group_file_unread_notified.insert(group_name).second) {
+            std::cout << "[未读提示] 群 " << group_name
+                      << " 有待接收文件；进入该群聊后才开始接收。\n";
+          }
+          return true;
+        }
+      }
+    }
+
     if (!begin_incoming_download(transport, words, state, cache)) {
-      std::cerr << "[file error] invalid FILE_OFFER.\n";
+      std::cerr << "[文件错误] FILE_OFFER 无效。\n";
     }
 
     return true;
@@ -842,7 +934,7 @@ bool handle_file_protocol_line(TlsClientTransport &transport,
 
       if (iterator != state.downloads.end() &&
           iterator->second.received_size != offset) {
-        std::cerr << "[file error] server resume offset " << offset
+        std::cerr << "[文件错误] 服务端断点位置 " << offset
                   << " does not match local offset "
                   << iterator->second.received_size << " for #F" << transfer_id
                   << ".\n";

@@ -92,6 +92,11 @@ void ChatServer::configure_command_routes() {
 
   add_arguments_handler("GROUP_REQUESTS", &ChatServer::handle_group_requests);
 
+  command_router_.add(
+      "GROUP_REQUESTS_ALL",
+      [this](const TcpConnectionPtr &connection, ClientSession &session,
+             const Command &) { handle_group_requests_all(connection, session); });
+
   add_arguments_handler("APPROVE_GROUP", &ChatServer::handle_approve_group);
 
   add_arguments_handler("REJECT_GROUP", &ChatServer::handle_reject_group);

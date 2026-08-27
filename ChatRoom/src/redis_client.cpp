@@ -208,7 +208,7 @@ bool RedisClient::adjust_unread(const std::string &username,
                                 const std::string &kind, std::int64_t delta,
                                 std::int64_t &result, std::string &error) {
   if (!is_supported_unread_kind(kind)) {
-    error = "unsupported Redis unread kind: " + kind;
+    error = "不支持的 Redis 未读类型：" + kind;
     return false;
   }
 
@@ -352,7 +352,7 @@ bool RedisClient::connect_locked(std::string &error) {
                                      static_cast<int>(config_.port), timeout);
 
   if (context_ == nullptr) {
-    error = "redisConnectWithTimeout returned null";
+    error = "Redis 超时连接返回空指针";
     return false;
   }
 

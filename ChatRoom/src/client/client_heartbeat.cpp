@@ -18,7 +18,7 @@ bool ClientHeartbeat::tick(TlsClientTransport &transport, std::string &error) {
   if (waiting_for_pong_) {
     //检测时间是否超过60秒
     if (now - pending_since_ >= pong_timeout_) {
-      error = "server did not answer client TCP heartbeat PING";
+      error = "服务端未响应客户端 TCP 心跳 PING";
       return false;
     }
 
@@ -31,7 +31,7 @@ bool ClientHeartbeat::tick(TlsClientTransport &transport, std::string &error) {
   //生成唯一序列号
   const std::uint64_t nonce = next_nonce_++;
 
-  if (!transport.send("PING " + std::to_string(nonce) + "\n", error)) {
+  if (!transport.queue_send("PING " + std::to_string(nonce) + "\n", error)) {
     return false;
   }
 

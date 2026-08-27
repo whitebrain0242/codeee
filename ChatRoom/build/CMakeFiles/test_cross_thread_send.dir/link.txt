@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/test_cross_thread_send.dir/tests/test_cross_thread_send.cpp.o -o test_cross_thread_send  libminimuduo.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so 

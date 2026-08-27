@@ -31,17 +31,17 @@ std::string format_local_time(std::int64_t unix_ms) {
 
 void print_indented_content(const std::string &content) {
   if (content.empty()) {
-    std::cout << "      <empty content>\n";
+    std::cout << "      <空内容>\n";
     return;
   }
 
   std::size_t begin = 0U;
   while (begin <= content.size()) {
     const std::size_t newline = content.find('\n', begin);
-    const std::string line =
+    const std::string text_line =
         newline == std::string::npos ? content.substr(begin)
                                      : content.substr(begin, newline - begin);
-    std::cout << "      " << line << '\n';
+    std::cout << "      " << text_line << '\n';
     if (newline == std::string::npos) break;
     begin = newline + 1U;
   }
@@ -49,7 +49,7 @@ void print_indented_content(const std::string &content) {
 
 bool require_no_arguments(int number, const std::string &arguments) {
   if (trim(arguments).empty()) return true;
-  std::cout << "[local error] command " << number << " takes no arguments.\n";
+  std::cout << "[本地错误] 命令 " << number << " 不接受额外参数。\n";
   return false;
 }
 } // namespace
@@ -68,8 +68,8 @@ bool handle_local_numeric_command(TlsClientTransport &transport,
 
   if (command_number == 40) {
     if (!require_no_arguments(command_number, arguments)) return true;
-    std::cout << "[local] SQLite database: " << cache.database_path() << '\n'
-              << "[local] download root: " << state.download_root.string() << '\n';
+    std::cout << "[本地] SQLite 数据库：" << cache.database_path() << '\n'
+              << "[本地] 下载目录：" << state.download_root.string() << '\n';
     return true;
   }
 
@@ -83,15 +83,14 @@ bool handle_local_numeric_command(TlsClientTransport &transport,
   if (command_number == 11) {
     const std::vector<std::string> words = split_words(arguments);
     if (words.empty() || words.size() > 2U) {
-      std::cout << "[local error] command 11 requires <username> [count]; "
-                   "the target must be explicit.\n";
+      std::cout << "[本地错误] 命令 11 需要输入 <好友用户名> [条数]。\n";
       return true;
     }
 
     std::size_t count = kDefaultLocalHistory;
     if (words.size() == 2U &&
         !parse_count(words[1], 1U, kMaxLocalHistory, count)) {
-      std::cout << "[local error] count must be 1-200.\n";
+      std::cout << "[本地错误] 历史条数必须在 1-200 之间。\n";
       return true;
     }
 
@@ -99,17 +98,17 @@ bool handle_local_numeric_command(TlsClientTransport &transport,
     std::string error;
     if (!cache.recent_private_messages(state.active_username, words[0], count,
                                        messages, error)) {
-      std::cout << "[local sqlite error] " << error << '\n';
+      std::cout << "[本地 SQLite 错误] " << error << '\n';
       return true;
     }
 
-    std::cout << "[local private history with " << words[0] << "] "
-              << messages.size() << " message(s):\n";
+    std::cout << "[本地私聊历史] 好友：" << words[0] << "，共 "
+              << messages.size() << " 条：\n";
     for (const LocalPrivateMessage &message : messages) {
       std::cout << "  #" << message.server_message_id << "  "
                 << format_local_time(message.received_at_unix_ms) << "  "
                 << message.sender_username << " -> " << message.recipient_username;
-      if (message.offline_delivery) std::cout << "  [offline-delivery]";
+      if (message.offline_delivery) std::cout << "  [离线投递]";
       std::cout << '\n';
       print_indented_content(message.content);
     }
@@ -119,15 +118,14 @@ bool handle_local_numeric_command(TlsClientTransport &transport,
   if (command_number == 12) {
     const std::vector<std::string> words = split_words(arguments);
     if (words.empty() || words.size() > 2U) {
-      std::cout << "[local error] command 12 requires <group_name> [count]; "
-                   "the target must be explicit.\n";
+      std::cout << "[本地错误] 命令 12 需要输入 <群名称> [条数]。\n";
       return true;
     }
 
     std::size_t count = kDefaultLocalHistory;
     if (words.size() == 2U &&
         !parse_count(words[1], 1U, kMaxLocalHistory, count)) {
-      std::cout << "[local error] count must be 1-200.\n";
+      std::cout << "[本地错误] 历史条数必须在 1-200 之间。\n";
       return true;
     }
 
@@ -135,17 +133,17 @@ bool handle_local_numeric_command(TlsClientTransport &transport,
     std::string error;
     if (!cache.recent_group_messages(state.active_username, words[0], count,
                                      messages, error)) {
-      std::cout << "[local sqlite error] " << error << '\n';
+      std::cout << "[本地 SQLite 错误] " << error << '\n';
       return true;
     }
 
-    std::cout << "[local group history " << words[0] << "] "
-              << messages.size() << " message(s):\n";
+    std::cout << "[本地群聊历史] 群：" << words[0] << "，共 "
+              << messages.size() << " 条：\n";
     for (const LocalGroupMessage &message : messages) {
       std::cout << "  #G" << message.server_message_id << "  "
                 << format_local_time(message.received_at_unix_ms) << "  ["
                 << message.sender_username << "]";
-      if (message.offline_delivery) std::cout << "  [offline-delivery]";
+      if (message.offline_delivery) std::cout << "  [离线投递]";
       std::cout << '\n';
       print_indented_content(message.content);
     }
@@ -155,42 +153,42 @@ bool handle_local_numeric_command(TlsClientTransport &transport,
   if (command_number == 13) {
     if (!require_no_arguments(command_number, arguments)) return true;
     if (!has_active_chat(state)) {
-      std::cout << "[local error] command 13 requires an active chat session; "
-                   "use 8 or 9 first.\n";
+      std::cout << "[本地错误] 命令 13 需要当前已有活动会话，请先使用 8 或 9 进入会话。\n";
       return true;
     }
 
     const std::string scope =
         state.chat_scope == ClientChatScope::Private ? "PRIVATE" : "GROUP";
+    const char *scope_name =
+        state.chat_scope == ClientChatScope::Private ? "好友私聊" : "群聊";
     std::vector<LocalFileTransfer> files;
     std::string error;
     if (!cache.recent_file_transfers_for_chat(
             state.active_username, scope, state.chat_target, kMaxLocalHistory,
             files, error)) {
-      std::cout << "[local sqlite error] " << error << '\n';
+      std::cout << "[本地 SQLite 错误] " << error << '\n';
       return true;
     }
 
-    std::cout << "[local files] " << scope << " " << state.chat_target << ": "
-              << files.size() << " record(s):\n";
+    std::cout << "[本地文件记录] " << scope_name << "：" << state.chat_target
+              << "，共 " << files.size() << " 条：\n";
     for (const LocalFileTransfer &file : files) {
       std::cout << "  #F" << file.server_transfer_id << " "
-                << (file.outgoing ? "sent" : "received") << " "
-                << file.file_name << " (" << file.file_size
-                << " bytes) path=" << file.local_path << '\n';
+                << (file.outgoing ? "已发送" : "已接收") << " "
+                << file.file_name << "（" << file.file_size
+                << " 字节）路径=" << file.local_path << '\n';
     }
     return true;
   }
 
-  // command 14
   if (!has_active_chat(state)) {
-    std::cout << "[local error] command 14 requires an active chat session; "
-                 "use 8 or 9 first.\n";
+    std::cout << "[本地错误] 命令 14 需要当前已有活动会话，请先使用 8 或 9 进入会话。\n";
     return true;
   }
+
   const std::string path = trim(arguments);
   if (path.empty()) {
-    std::cout << "[local error] command 14 requires <file_path>.\n";
+    std::cout << "[本地错误] 命令 14 需要输入文件路径。\n";
     return true;
   }
 

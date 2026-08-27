@@ -8,7 +8,7 @@ MYSQL *open_connection(const MySqlConfig &config, std::string &error) {
   MYSQL *connection = mysql_init(nullptr);
 
   if (connection == nullptr) {
-    error = "mysql_init failed";
+    error = "MySQL 初始化失败";
     return nullptr;
   }
 
@@ -93,7 +93,7 @@ bool MySqlConnectionPool::initialize(const MySqlConfig &config,
         mysql_close(item);
       }
 
-      error = "MySQL pool initialization failed at connection " +
+      error = "MySQL 连接池初始化失败，连接 " +
               std::to_string(i + 1U) + "/" + std::to_string(config.pool_size) +
               ": " + error;
 
@@ -125,12 +125,12 @@ MySqlConnectionPool::Lease MySqlConnectionPool::acquire(std::string &error) {
   });
 
   if (!ready) {
-    error = "timed out waiting for a MySQL pool connection";
+    error = "等待 MySQL 连接池连接超时";
     return {};
   }
 
   if (stopping_ || available_.empty()) {
-    error = "MySQL connection pool is stopping";
+    error = "MySQL 连接池正在停止";
     return {};
   }
 

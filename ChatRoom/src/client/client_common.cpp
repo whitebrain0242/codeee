@@ -59,7 +59,7 @@ bool require_local_account(const ClientState &state) {
     return true;
   }
 
-  std::cout << "[local error] login first so the "
+  std::cout << "[本地错误] 请先登录，才能"
                "SQLite account context is known.\n";
 
   return false;

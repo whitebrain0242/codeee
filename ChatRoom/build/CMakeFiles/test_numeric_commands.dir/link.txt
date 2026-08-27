@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/test_numeric_commands.dir/tests/test_numeric_commands.cpp.o CMakeFiles/test_numeric_commands.dir/src/client/client_numeric_commands.cpp.o CMakeFiles/test_numeric_commands.dir/src/protocol.cpp.o -o test_numeric_commands 

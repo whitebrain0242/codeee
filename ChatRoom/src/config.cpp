@@ -37,7 +37,7 @@ bool load_key_values(const std::string &path, const std::string &label,
                      std::string &error) {
   std::ifstream input(path);
   if (!input) {
-    error = "cannot open " + label + " config: " + path;
+    error = "无法打开 " + label + " 配置文件：" + path;
     return false;
   }
 
@@ -66,7 +66,7 @@ bool load_key_values(const std::string &path, const std::string &label,
     const std::string value = trim(cleaned.substr(equals + 1));
 
     if (key.empty()) {
-      error = "empty config key on line " + std::to_string(line_number);
+      error = "配置文件存在空键，行号：" + std::to_string(line_number);
       return false;
     }
 
@@ -98,7 +98,7 @@ bool load_mysql_config(const std::string &path, MySqlConfig &config,
     unsigned int parsed = 0;
     if (!parse_unsigned(values["port"], parsed) || parsed == 0U ||
         parsed > 65535U) {
-      error = "invalid MySQL port";
+      error = "MySQL 端口无效";
       return false;
     }
     config.port = parsed;
@@ -109,7 +109,7 @@ bool load_mysql_config(const std::string &path, MySqlConfig &config,
     unsigned int parsed = 0;
     if (!parse_unsigned(values["connect_timeout_seconds"], parsed) ||
         parsed == 0U || parsed > 60U) {
-      error = "invalid connect_timeout_seconds";
+      error = "连接超时秒数无效";
       return false;
     }
     config.connect_timeout_seconds = parsed;
@@ -119,7 +119,7 @@ bool load_mysql_config(const std::string &path, MySqlConfig &config,
     unsigned int parsed = 0;
     if (!parse_unsigned(values["pool_size"], parsed) || parsed == 0U ||
         parsed > 64U) {
-      error = "MySQL pool_size must be 1-64";
+      error = "MySQL 连接池大小必须在 1-64 之间";
       return false;
     }
     config.pool_size = parsed;
@@ -127,11 +127,11 @@ bool load_mysql_config(const std::string &path, MySqlConfig &config,
 
   // 强制检查：user 和 database 必填
   if (config.user.empty()) {
-    error = "MySQL config requires user";
+    error = "MySQL 配置缺少 user";
     return false;
   }
   if (config.database.empty()) {
-    error = "MySQL config requires database";
+    error = "MySQL 配置缺少 database";
     return false;
   }
   return true;
@@ -163,7 +163,7 @@ bool load_redis_config(const std::string &path, RedisConfig &config,
     unsigned int parsed = 0;
     if (!parse_unsigned(values["port"], parsed) || parsed == 0U ||
         parsed > 65535U) {
-      error = "invalid Redis port";
+      error = "Redis 端口无效";
       return false;
     }
     config.port = parsed;
@@ -173,7 +173,7 @@ bool load_redis_config(const std::string &path, RedisConfig &config,
   if (values.count("database")) {
     unsigned int parsed = 0;
     if (!parse_unsigned(values["database"], parsed) || parsed > 255U) {
-      error = "invalid Redis database";
+      error = "Redis 数据库编号无效";
       return false;
     }
     config.database = parsed;
@@ -184,7 +184,7 @@ bool load_redis_config(const std::string &path, RedisConfig &config,
     unsigned int parsed = 0;
     if (!parse_unsigned(values["connect_timeout_ms"], parsed) || parsed == 0U ||
         parsed > 30000U) {
-      error = "invalid Redis connect_timeout_ms";
+      error = "Redis 连接超时毫秒数无效";
       return false;
     }
     config.connect_timeout_ms = parsed;
@@ -195,7 +195,7 @@ bool load_redis_config(const std::string &path, RedisConfig &config,
     unsigned int parsed = 0;
     if (!parse_unsigned(values["presence_ttl_seconds"], parsed) ||
         parsed < 30U || parsed > 86400U) {
-      error = "presence_ttl_seconds must be 30-86400";
+      error = "在线状态 TTL 必须在 30-86400 秒之间";
       return false;
     }
     config.presence_ttl_seconds = parsed;
@@ -203,15 +203,15 @@ bool load_redis_config(const std::string &path, RedisConfig &config,
 
   // 强制必填项：host, key_prefix, server_name
   if (config.host.empty()) {
-    error = "Redis config requires host";
+    error = "Redis 配置缺少 host";
     return false;
   }
   if (config.key_prefix.empty()) {
-    error = "Redis config requires key_prefix";
+    error = "Redis 配置缺少 key_prefix";
     return false;
   }
   if (config.server_name.empty()) {
-    error = "Redis config requires server_name";
+    error = "Redis 配置缺少 server_name";
     return false;
   }
   return true;
@@ -227,7 +227,7 @@ bool load_tls_server_config(const std::string &path, TlsServerConfig &config,
 
   if (values.count("enabled")) {
     if (!parse_bool(values["enabled"], config.enabled)) {
-      error = "invalid TLS server enabled value";
+      error = "TLS 服务端 enabled 配置值无效";
       return false;
     }
   }
@@ -239,13 +239,13 @@ bool load_tls_server_config(const std::string &path, TlsServerConfig &config,
 
   // 强制开启TLS
   if (!config.enabled) {
-    error = "TLS server enabled=false is not allowed in chatroom v8.4";
+    error = "当前版本不允许关闭 TLS 服务端";
     return false;
   }
 
   // 证书和私钥文件路径必须存在（路径为空时报错）
   if (config.certificate_file.empty() || config.private_key_file.empty()) {
-    error = "TLS server config requires certificate_file and private_key_file";
+    error = "TLS 服务端配置缺少证书文件或私钥文件";
     return false;
   }
   return true;
@@ -261,14 +261,14 @@ bool load_tls_client_config(const std::string &path, TlsClientConfig &config,
   //有没有开启
   if (values.count("enabled")) {
     if (!parse_bool(values["enabled"], config.enabled)) {
-      error = "invalid TLS client enabled value";
+      error = "TLS 客户端 enabled 配置值无效";
       return false;
     }
   }
   //是否验证证书
   if (values.count("verify_peer")) {
     if (!parse_bool(values["verify_peer"], config.verify_peer)) {
-      error = "invalid TLS client verify_peer value";
+      error = "TLS 客户端 verify_peer 配置值无效";
       return false;
     }
   }
@@ -280,13 +280,13 @@ bool load_tls_client_config(const std::string &path, TlsClientConfig &config,
 
   // 同样强制开启 TLS,但是身份验证不是这个
   if (!config.enabled) {
-    error = "TLS client enabled=false is not allowed in chatroom v8.4";
+    error = "当前版本不允许关闭 TLS 客户端";
     return false;
   }
 
   // 如果要求验证对端（verify_peer=true），CA 证书必填
   if (config.verify_peer && config.ca_file.empty()) {
-    error = "TLS client verify_peer=true requires ca_file";
+    error = "启用 TLS 对端校验时必须配置 ca_file";
     return false;
   }
   return true;

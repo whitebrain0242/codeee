@@ -7,7 +7,7 @@
 #include <string>
 //网络IO缓冲区大小
 inline constexpr std::size_t
-    kClientBufferSize = 4096U;
+    kClientBufferSize = 64U * 1024U;
 //客户端本地默认消息历史数
 inline constexpr std::size_t
     kDefaultLocalHistory = 20U;
@@ -18,10 +18,10 @@ inline constexpr std::size_t
 inline constexpr std::uint64_t
     kMaxFileSize =
         100ULL * 1024ULL * 1024ULL * 1024ULL;
-//每收到4MB,就写入一次磁盘.part文件中,在内存中更新哈希值
+// 文件上传帧：16 MiB。配合服务端“整帧聚合后一次落盘”，显著减少系统调用。
 inline constexpr std::uint64_t
     kFileFrameBytes =
-        4ULL * 1024ULL * 1024ULL;
+        16ULL * 1024ULL * 1024ULL;
 //获取当前系统的时间戳
 std::int64_t client_now_unix_ms();
 //判断字符串text是否以prefix 开头,用于快速路由

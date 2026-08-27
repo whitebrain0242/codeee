@@ -12,7 +12,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (argc >= 3 && !parse_port(argv[2], config.port)) {
-    std::cerr << "invalid port\n";
+    std::cerr << "端口号无效\n";
     return 1;
   }
 

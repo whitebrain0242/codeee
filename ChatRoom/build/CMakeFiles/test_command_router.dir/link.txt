@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/test_command_router.dir/tests/test_command_router.cpp.o CMakeFiles/test_command_router.dir/src/server/command_router.cpp.o -o test_command_router  libchat_proto.a /usr/lib/x86_64-linux-gnu/libprotobuf.so /usr/lib/x86_64-linux-gnu/libmysqlclient.so 

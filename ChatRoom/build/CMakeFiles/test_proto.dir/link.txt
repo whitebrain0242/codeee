@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/test_proto.dir/tests/test_proto.cpp.o -o test_proto  libchat_proto.a /usr/lib/x86_64-linux-gnu/libprotobuf.so 

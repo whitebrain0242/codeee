@@ -33,10 +33,13 @@ public:
   FileDeliveryPump(std::uint64_t transfer_id, std::filesystem::path path,
                    std::uint64_t start_offset, std::uint64_t total_size,
                    minimuduo::net::TcpConnectionPtr connection,
+                   FileTransferService::ContinueCallback can_continue,
                    FileTransferService::CompletionCallback completion)
       : transfer_id_(transfer_id), path_(std::move(path)),
         offset_(start_offset), total_size_(total_size),
-        connection_(std::move(connection)), completion_(std::move(completion)) {
+        connection_(std::move(connection)),
+        can_continue_(std::move(can_continue)),
+        completion_(std::move(completion)) {
   }
 
   void start() {
@@ -54,6 +57,11 @@ public:
 
 private:
   void send_next() {
+    if (can_continue_ && !can_continue_()) {
+      finish(false, "delivery permission revoked");
+      return;
+    }
+
     if (!connection_ || !connection_->connected()) {
       finish(false, "recipient connection closed during file delivery");
       return;
@@ -106,6 +114,7 @@ private:
   std::uint64_t offset_ = 0U;
   std::uint64_t total_size_ = 0U;
   minimuduo::net::TcpConnectionPtr connection_;
+  FileTransferService::ContinueCallback can_continue_;
   FileTransferService::CompletionCallback completion_;
 };
 
@@ -145,7 +154,7 @@ bool FileTransferService::initialize(std::string &error) {
   std::filesystem::create_directories(temp_root_, filesystem_error);
 
   if (filesystem_error) {
-    error = "cannot create file-transfer temp directory: " +
+    error = "无法创建文件传输临时目录：" +
             filesystem_error.message();
     return false;
   }
@@ -153,7 +162,7 @@ bool FileTransferService::initialize(std::string &error) {
   std::filesystem::create_directories(files_root_, filesystem_error);
 
   if (filesystem_error) {
-    error = "cannot create file-transfer storage directory: " +
+    error = "无法创建文件传输存储目录：" +
             filesystem_error.message();
     return false;
   }
@@ -168,14 +177,14 @@ bool FileTransferService::begin_or_resume_upload(
   std::lock_guard<std::mutex> lock(upload_mutex_);
 
   if (!requested.has_metadata()) {
-    error = "upload resume state has no metadata";
+    error = "上传断点状态缺少元数据";
     return false;
   }
 
   const FileTransferMetadata &metadata = requested.metadata();
 
   if (!fileutil::is_valid_transfer_token(metadata.transfer_token())) {
-    error = "invalid transfer token";
+    error = "文件传输令牌无效";
     return false;
   }
 
@@ -189,7 +198,7 @@ bool FileTransferService::begin_or_resume_upload(
   const bool part_exists = std::filesystem::exists(temp_path, filesystem_error);
 
   if (filesystem_error) {
-    error = "cannot inspect upload part file";
+    error = "无法检查上传临时文件";
     return false;
   }
 
@@ -198,7 +207,7 @@ bool FileTransferService::begin_or_resume_upload(
   const bool meta_exists = std::filesystem::exists(meta_path, filesystem_error);
 
   if (filesystem_error) {
-    error = "cannot inspect upload resume metadata";
+    error = "无法检查上传断点元数据";
     return false;
   }
 
@@ -210,8 +219,7 @@ bool FileTransferService::begin_or_resume_upload(
     }
 
     if (!same_resume_identity(requested, existing)) {
-      error = "transfer token already belongs "
-              "to different upload metadata";
+      error = "文件传输令牌已经属于另一份上传元数据";
       return false;
     }
 
@@ -219,13 +227,12 @@ bool FileTransferService::begin_or_resume_upload(
         std::filesystem::file_size(temp_path, filesystem_error));
 
     if (filesystem_error) {
-      error = "cannot inspect resumed upload size";
+      error = "无法检查断点续传文件大小";
       return false;
     }
 
     if (current_size > metadata.file_size()) {
-      error = "server partial file is larger "
-              "than declared file size";
+      error = "服务端临时文件大于声明的文件大小";
       return false;
     }
 
@@ -249,7 +256,7 @@ bool FileTransferService::begin_or_resume_upload(
     std::ofstream output(temp_path, std::ios::binary | std::ios::trunc);
 
     if (!output) {
-      error = "cannot create temporary upload file";
+      error = "无法创建上传临时文件";
       return false;
     }
   }
@@ -279,7 +286,7 @@ bool FileTransferService::append_upload_bytes(
     const char *bytes, std::size_t byte_count, std::uint64_t &accepted_offset,
     std::string &error) {
   if (byte_count > 0U && bytes == nullptr) {
-    error = "upload byte buffer is null";
+    error = "上传数据缓冲区为空";
     return false;
   }
 
@@ -291,19 +298,19 @@ bool FileTransferService::append_upload_bytes(
       std::filesystem::file_size(temp_path, filesystem_error));
 
   if (filesystem_error) {
-    error = "cannot stat upload part file: " + filesystem_error.message();
+    error = "无法获取上传临时文件状态：" + filesystem_error.message();
     return false;
   }
 
   if (current_size != expected_offset) {
-    error = "server upload part offset changed";
+    error = "服务端上传临时文件偏移量发生变化";
     return false;
   }
 
   std::ofstream output(temp_path, std::ios::binary | std::ios::app);
 
   if (!output) {
-    error = "cannot open upload part file for append";
+    error = "无法以追加方式打开上传临时文件";
     return false;
   }
 
@@ -312,7 +319,7 @@ bool FileTransferService::append_upload_bytes(
   }
 
   if (!output) {
-    error = "failed to append raw upload bytes";
+    error = "追加上传二进制数据失败";
     return false;
   }
 
@@ -334,13 +341,12 @@ bool FileTransferService::finalize_upload(
       std::filesystem::file_size(temp_path, filesystem_error));
 
   if (filesystem_error) {
-    error = "cannot inspect completed upload";
+    error = "无法检查已完成上传文件";
     return false;
   }
 
   if (actual_size != expected_size) {
-    error = "uploaded file size does not match "
-            "FILE_BEGIN";
+    error = "上传文件大小与 FILE_BEGIN 声明不一致";
     return false;
   }
 
@@ -358,7 +364,7 @@ bool FileTransferService::finalize_upload(
                  });
 
   if (actual_sha256 != expected) {
-    error = "uploaded file SHA-256 mismatch";
+    error = "上传文件 SHA-256 校验不一致";
     return false;
   }
 
@@ -378,7 +384,7 @@ bool FileTransferService::finalize_upload(
         std::filesystem::copy_options::overwrite_existing, filesystem_error);
 
     if (filesystem_error) {
-      error = "cannot move completed file "
+      error = "无法移动已完成文件 "
               "into storage: " +
               filesystem_error.message();
       return false;
@@ -417,11 +423,13 @@ void FileTransferService::deliver_async(
     std::uint64_t transfer_id, const FileTransferMetadata &metadata,
     std::uint64_t start_offset,
     const minimuduo::net::TcpConnectionPtr &connection,
+    ContinueCallback can_continue,
     CompletionCallback completion) {
   submit([this, transfer_id, metadata, start_offset, connection,
+          can_continue = std::move(can_continue),
           completion = std::move(completion)]() mutable {
     deliver_file(transfer_id, std::move(metadata), start_offset, connection,
-                 std::move(completion));
+                 std::move(can_continue), std::move(completion));
   });
 }
 
@@ -507,6 +515,7 @@ void FileTransferService::submit(std::function<void()> task) {
 void FileTransferService::deliver_file(
     std::uint64_t transfer_id, FileTransferMetadata metadata,
     std::uint64_t start_offset, minimuduo::net::TcpConnectionPtr connection,
+    ContinueCallback can_continue,
     CompletionCallback completion) {
   if (connection == nullptr || !connection->connected()) {
     if (completion) {
@@ -546,7 +555,7 @@ void FileTransferService::deliver_file(
 
   auto pump = std::make_shared<FileDeliveryPump>(
       transfer_id, file_path, start_offset, metadata.file_size(),
-      std::move(connection), std::move(completion));
+      std::move(connection), std::move(can_continue), std::move(completion));
 
   pump->start();
 }
@@ -567,8 +576,8 @@ bool FileTransferService::write_resume_state(const std::filesystem::path &path,
   std::string bytes;
 
   if (!state.SerializeToString(&bytes)) {
-    error = "official protobuf failed to "
-            "serialize FileUploadResumeState";
+    error = "Protobuf 处理失败："
+            "序列化 FileUploadResumeState 失败";
     return false;
   }
 
@@ -578,15 +587,15 @@ bool FileTransferService::write_resume_state(const std::filesystem::path &path,
     std::ofstream output(temp, std::ios::binary | std::ios::trunc);
 
     if (!output) {
-      error = "cannot create upload resume sidecar";
+      error = "无法创建上传断点元数据文件";
       return false;
     }
 
     output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 
     if (!output) {
-      error = "failed to write upload "
-              "resume sidecar";
+      error = "写入上传数据失败："
+              "断点元数据文件";
       return false;
     }
   }
@@ -606,8 +615,8 @@ bool FileTransferService::write_resume_state(const std::filesystem::path &path,
   }
 
   if (filesystem_error) {
-    error = "cannot finalize upload resume "
-            "sidecar: " +
+    error = "无法完成上传断点状态："
+            "断点元数据文件：" +
             filesystem_error.message();
     return false;
   }
@@ -621,7 +630,7 @@ bool FileTransferService::read_resume_state(const std::filesystem::path &path,
   std::ifstream input(path, std::ios::binary);
 
   if (!input) {
-    error = "cannot open upload resume sidecar";
+    error = "无法打开上传断点元数据文件";
     return false;
   }
 
@@ -629,14 +638,13 @@ bool FileTransferService::read_resume_state(const std::filesystem::path &path,
                     std::istreambuf_iterator<char>());
 
   if (!input.eof() && input.fail()) {
-    error = "failed to read upload "
-            "resume sidecar";
+    error = "读取上传数据失败："
+            "断点元数据文件";
     return false;
   }
 
   if (!state.ParseFromString(bytes)) {
-    error = "official protobuf failed to parse "
-            "FileUploadResumeState";
+    error = "Protobuf 解析 FileUploadResumeState 失败";
     return false;
   }
 

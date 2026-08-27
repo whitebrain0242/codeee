@@ -180,6 +180,7 @@ target_link_libraries(
         PkgConfig::SQLITE3
         OpenSSL::SSL
         OpenSSL::Crypto
+        Threads::Threads
 )
 
 chat_warnings(chat_client)

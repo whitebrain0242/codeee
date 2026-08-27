@@ -23,7 +23,7 @@ bool isIpLiteral(
 // 配置通用参数--选择最低版本和最高版本
 bool configureCommonContext(SSL_CTX *context, std::string &error) {
   if (context == nullptr) {
-    error = "SSL_CTX is null";
+    error = "SSL_CTX 为空";
     return false;
   }
   // 设置最版本是1.2
@@ -72,7 +72,7 @@ bool TlsServerContext::initialize(const TlsServerConfig &config,
   }
 
   if (!config.enabled) {
-    error = "TLS server config has enabled=false; v8.4 requires TLS";
+    error = "TLS 服务端被关闭，但当前版本要求启用 TLS";
     return false;
   }
 
@@ -118,7 +118,7 @@ bool TlsServerContext::initialize(const TlsServerConfig &config,
 
 SslPtr TlsServerContext::createSsl(int socketFd, std::string &error) const {
   if (context_ == nullptr) {
-    error = "TLS server context is not initialized";
+    error = "TLS 服务端上下文尚未初始化";
     return {};
   }
   // 创建SSL对象，使用智能指针接管
@@ -156,7 +156,7 @@ bool TlsClientContext::initialize(const TlsClientConfig &config,
   }
 
   if (!config.enabled) {
-    error = "TLS client config has enabled=false; v8.4 requires TLS";
+    error = "TLS 客户端被关闭，但当前版本要求启用 TLS";
     return false;
   }
 
@@ -178,7 +178,7 @@ bool TlsClientContext::initialize(const TlsClientConfig &config,
     SSL_CTX_set_verify(context_, SSL_VERIFY_PEER, nullptr);
 
     if (config.ca_file.empty()) {
-      error = "TLS client verify_peer=true requires ca_file";
+      error = "TLS 客户端启用对端校验时必须配置 CA 文件";
       SSL_CTX_free(context_);
       context_ = nullptr;
       return false;
@@ -202,7 +202,7 @@ SslPtr TlsClientContext::createSsl(int socketFd,
                                    const std::string &peerIdentity,
                                    std::string &error) const {
   if (context_ == nullptr) {
-    error = "TLS client context is not initialized";
+    error = "TLS 客户端上下文尚未初始化";
     return {};
   }
 
@@ -219,26 +219,26 @@ SslPtr TlsClientContext::createSsl(int socketFd,
 
   if (verify_peer_) {
     if (peerIdentity.empty()) {
-      error = "TLS peer identity cannot be empty when verification is enabled";
+      error = "启用 TLS 身份校验时对端身份不能为空";
       return {};
     }
     // 获取 X509_VERIFY_PARAM 对象，用于设置证书验证参数
     X509_VERIFY_PARAM *parameters = SSL_get0_param(ssl.get());
     if (parameters == nullptr) {
-      error = "SSL_get0_param returned null";
+      error = "SSL_get0_param 返回空指针";
       return {};
     }
 
     if (isIpLiteral(peerIdentity)) { // 如果是IP地址
       if (X509_VERIFY_PARAM_set1_ip_asc(parameters, peerIdentity.c_str()) !=
           1) {
-        error = "X509_VERIFY_PARAM_set1_ip_asc failed";
+        error = "设置 X509 IP 校验参数失败";
         return {};
       }
     } else { // 如果是域名
       if (SSL_set1_host(ssl.get(), peerIdentity.c_str()) !=
           1) { // 设置期望的域名，用于证书匹配
-        error = "SSL_set1_host failed";
+        error = "设置 TLS 主机名校验失败";
         return {};
       }
       // 设置 SNI（Server Name
@@ -258,7 +258,7 @@ bool TlsClientContext::connectBlocking(
     SSL *ssl,
     std::string &error) const { // 执行阻塞式握手，要么握手完成要么出错
   if (ssl == nullptr) {
-    error = "SSL is null";
+    error = "SSL 对象为空";
     return false;
   }
   //客户端发起SSl握手

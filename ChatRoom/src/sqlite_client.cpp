@@ -483,7 +483,7 @@ bool SqliteClient::recent_file_transfers_for_chat(
         "WHERE account_username=? AND scope='GROUP' AND group_name=? "
         "ORDER BY server_transfer_id DESC LIMIT ?";
   } else {
-    error = "invalid chat scope for file history";
+    error = "文件历史记录的会话类型无效";
     return false;
   }
 
@@ -861,7 +861,7 @@ bool SqliteClient::clear_account_data(
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (database_ == nullptr) {
-    error = "SQLite database is not open";
+    error = "SQLite 数据库尚未打开";
     return false;
   }
 

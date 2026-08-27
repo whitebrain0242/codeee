@@ -14,6 +14,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -49,7 +50,7 @@ private:
   static constexpr std::size_t kOfflineFileDeliveryBatch = 10;
   static constexpr std::uint64_t kMaxFileSize =
       100ULL * 1024ULL * 1024ULL * 1024ULL;
-  static constexpr std::uint64_t kMaxFileFrameBytes = 4ULL * 1024ULL * 1024ULL;
+  static constexpr std::uint64_t kMaxFileFrameBytes = 16ULL * 1024ULL * 1024ULL;
 
   minimuduo::net::TcpServer &tcp_server_;
   MySqlDatabase &database_;
@@ -69,6 +70,30 @@ private:
 
   std::mutex friend_operation_mutex_;
   std::mutex group_operation_mutex_;
+
+  // 会话权限缓存版本。任何好友/屏蔽或群成员关系变化都会递增，
+  // 热消息路径只比较原子版本，不再每条消息重复做多次权限 SQL。
+  std::atomic<std::uint64_t> direct_policy_generation_{1U};
+  std::atomic<std::uint64_t> group_policy_generation_{1U};
+
+  enum class DeliveryPersistKind {
+    Private,
+    Group
+  };
+
+  struct DeliveryPersistTask {
+    DeliveryPersistKind kind = DeliveryPersistKind::Private;
+    std::uint64_t message_id = 0U;
+    std::string recipient;
+    bool decrement_unread = false;
+  };
+
+  // 网络线程只负责把消息写给在线用户；“已投递”数据库更新交给后台线程，
+  // 避免 100 条消息的 100 次 UPDATE 堵住 Reactor/TLS 读写。
+  std::mutex delivery_persist_mutex_;
+  std::condition_variable delivery_persist_cv_;
+  std::deque<DeliveryPersistTask> delivery_persist_queue_;
+  std::thread delivery_persist_thread_;
 
   void on_connection(const TcpConnectionPtr &connection);
   void on_message(const TcpConnectionPtr &connection,
@@ -99,16 +124,16 @@ private:
                              const std::string &message);
 
   void handle_private_message(const TcpConnectionPtr &connection,
-                              const ClientSession &session,
+                              ClientSession &session,
                               const std::string &arguments);
 
   // 数字命令 8/9 对应的服务端会话目标校验。
   void handle_enter_private(const TcpConnectionPtr &connection,
-                            const ClientSession &session,
+                            ClientSession &session,
                             const std::string &arguments);
 
   void handle_enter_group(const TcpConnectionPtr &connection,
-                          const ClientSession &session,
+                          ClientSession &session,
                           const std::string &arguments);
 
   void handle_who(const TcpConnectionPtr &connection,
@@ -190,6 +215,9 @@ private:
                              const ClientSession &session,
                              const std::string &arguments);
 
+  void handle_group_requests_all(const TcpConnectionPtr &connection,
+                                 const ClientSession &session);
+
   void handle_approve_group(const TcpConnectionPtr &connection,
                             const ClientSession &session,
                             const std::string &arguments);
@@ -203,7 +231,7 @@ private:
                                   const std::string &arguments);
 
   void handle_group_message(const TcpConnectionPtr &connection,
-                            const ClientSession &session,
+                            ClientSession &session,
                             const std::string &arguments);
 
   void handle_history_group(const TcpConnectionPtr &connection,
@@ -321,6 +349,12 @@ private:
   static std::string join_names(const std::vector<std::string> &names);
   static std::string group_role_name(GroupRole role);
   static bool is_group_manager(GroupRole role);
+
+  void enqueue_delivery_persist(DeliveryPersistKind kind,
+                                std::uint64_t message_id,
+                                std::string recipient,
+                                bool decrement_unread = false);
+  void delivery_persist_loop();
 
   void presence_refresh_loop();
 

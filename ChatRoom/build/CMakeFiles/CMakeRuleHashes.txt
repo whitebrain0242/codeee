@@ -1,0 +1,5 @@
+# Hashes of file build rules.
+5f51905e8912ff1872b297744a24c6b9 generated/chat_message.pb.h
+6adad2d4a55190ceb649531091dae2bb generated/file_transfer.pb.h
+18b0366c8058cdb4f62d9b2ac8c4dcfc generated/friend_event.pb.h
+14dfde6ce6f3738c2b81b62b77a83e1c generated/group_message.pb.h

@@ -16,7 +16,7 @@ void ChatServer::handle_block_friend(const TcpConnectionPtr &connection,
   }
 
   if (target == session.username) {
-    connection->send("[error] you cannot block yourself.\n");
+    connection->send("[error] 不能屏蔽自己。\n");
     return;
   }
 
@@ -34,8 +34,7 @@ void ChatServer::handle_block_friend(const TcpConnectionPtr &connection,
     }
 
     if (!friends) {
-      connection->send("[error] only an existing friend "
-                       "can be message-blocked.\n");
+      connection->send("[error] 只能屏蔽当前好友的私聊消息和文件。\n");
       return;
     }
 
@@ -47,16 +46,15 @@ void ChatServer::handle_block_friend(const TcpConnectionPtr &connection,
 
   if (!created) {
     connection->send("[system] " + target +
-                     " is already blocked from sending "
-                     "you direct messages/files.\n");
+                     " 已经在屏蔽列表中。\n");
     return;
   }
 
-  connection->send("[system] blocked direct messages/files from " + target +
-                   ". Friendship, old history, public chat and "
-                   "group chat are unchanged.\n"
-                   "[system] pending direct items from this friend "
-                   "remain stored but are not delivered while blocked.\n");
+  direct_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+  connection->send("[system] 已屏蔽来自 " + target +
+                   " 的私聊消息和文件。好友关系、历史记录、公共聊天和群聊不受影响。\n"
+                   "[system] 屏蔽期间，该好友发送的待处理私聊消息/文件仍会保存，但不会投递。\n");
 }
 
 void ChatServer::handle_unblock_friend(const TcpConnectionPtr &connection,
@@ -88,13 +86,14 @@ void ChatServer::handle_unblock_friend(const TcpConnectionPtr &connection,
 
   if (!removed) {
     connection->send("[error] " + target +
-                     " is not in your blocked-friend list.\n");
+                     " 不在你的好友屏蔽列表中。\n");
     return;
   }
 
-  connection->send("[system] unblocked direct messages/files from " + target +
-                   ". Use command 37 to immediately retry "
-                   "stored offline deliveries.\n");
+  direct_policy_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+  connection->send("[system] 已解除对 " + target +
+                   " 的私聊消息/文件屏蔽。可使用数字命令 37 立即重试已保存的离线投递。\n");
 }
 
 void ChatServer::handle_blocked_friends(const TcpConnectionPtr &connection,
@@ -111,7 +110,7 @@ void ChatServer::handle_blocked_friends(const TcpConnectionPtr &connection,
     return;
   }
 
-  connection->send("[system] blocked friends (" +
+  connection->send("[system] 已屏蔽好友（" +
                    std::to_string(blocked.size()) +
-                   "): " + join_names(blocked) + "\n");
+                   "）：" + join_names(blocked) + "\n");
 }

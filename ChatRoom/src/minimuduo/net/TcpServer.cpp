@@ -84,10 +84,16 @@ void TcpServer::newConnection(int socketFd, const sockaddr_in &peerAddress) {
 
   EventLoop *ioLoop = threadPool_->getNextLoop(); // 轮询分配工作线程
 
+  // 聊天是小消息高频场景：关闭 Nagle，避免几十毫秒级的小包合并等待。
+  std::string noDelayError;
+  if (!configureTcpNoDelay(socketFd, true, noDelayError)) {
+    std::cerr << "TCP_NODELAY 配置失败：" << noDelayError << '\n';
+  }
+
   // 配置 TCP Keep-Alive（60秒空闲，15秒探测间隔，3次重试）
   std::string keepaliveError;
   if (!configureTcpKeepAlive(socketFd, 60, 15, 3, keepaliveError)) {
-    std::cerr << "TCP keepalive configuration failed: " << keepaliveError
+    std::cerr << "TCP 保活配置失败：" << keepaliveError
               << '\n';
   }
 

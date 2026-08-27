@@ -26,7 +26,7 @@ std::string mysql_error_text(MYSQL *connection) {
 
 std::string mysql_stmt_error_text(MYSQL_STMT *statement) {
   return statement != nullptr ? mysql_stmt_error(statement)
-                              : "MYSQL_STMT is null";
+                              : "MySQL 预处理语句为空";
 }
 
 class MySqlThreadGuard {
@@ -77,7 +77,7 @@ public:
 
   bool prepare(const char *sql, std::string &error) {
     if (statement_ == nullptr) {
-      error = "mysql_stmt_init failed";
+      error = "MySQL 预处理语句初始化失败";
       return false;
     }
 
@@ -144,14 +144,14 @@ bool bind_params(MYSQL_STMT *statement, const std::vector<SqlParam> &params,
                  std::vector<unsigned long> &lengths,
                  std::deque<BindNullFlag> &null_flags, std::string &error) {
   if (statement == nullptr) {
-    error = "MYSQL_STMT is null";
+    error = "MySQL 预处理语句为空";
     return false;
   }
 
   const unsigned long expected = mysql_stmt_param_count(statement);
 
   if (expected != params.size()) {
-    error = "prepared statement parameter count mismatch";
+    error = "预处理语句参数数量不匹配";
     return false;
   }
 
@@ -221,7 +221,7 @@ bool execute_prepared(MYSQL *connection, const char *sql,
                       std::uint64_t *insert_id, std::uint64_t *affected_rows,
                       std::string &error) {
   if (connection == nullptr) {
-    error = "database is not connected";
+    error = "数据库尚未连接";
     return false;
   }
 
@@ -262,7 +262,7 @@ bool query_prepared(MYSQL *connection, const char *sql,
                     const std::vector<SqlParam> &params, Rows &rows,
                     std::string &error) {
   if (connection == nullptr) {
-    error = "database is not connected";
+    error = "数据库尚未连接";
     return false;
   }
 
@@ -376,7 +376,7 @@ bool query_prepared(MYSQL *connection, const char *sql,
     }
 
     if (fetch_result == MYSQL_DATA_TRUNCATED) {
-      error = "prepared statement result "
+      error = "预处理语句结果 "
               "was unexpectedly truncated";
       return false;
     }
@@ -449,7 +449,7 @@ std::size_t MySqlDatabase::pool_size() const noexcept { return pool_.size(); }
 
 bool MySqlDatabase::begin(std::string &error) {
   if (active_mysql_connection() == nullptr) {
-    error = "database is not connected";
+    error = "数据库尚未连接";
     return false;
   }
 
@@ -463,7 +463,7 @@ bool MySqlDatabase::begin(std::string &error) {
 
 bool MySqlDatabase::commit(std::string &error) {
   if (active_mysql_connection() == nullptr) {
-    error = "database is not connected";
+    error = "数据库尚未连接";
     return false;
   }
 
@@ -863,7 +863,7 @@ bool MySqlDatabase::accept_friend_request(const std::string &requester,
                         nullptr, &affected, error) ||
       affected != 1U) {
     if (error.empty()) {
-      error = "friend request does not exist";
+      error = "好友申请不存在";
     }
 
     rollback();
@@ -1117,7 +1117,7 @@ bool MySqlDatabase::add_friend_event(const FriendEventPayload &event,
   std::string payload;
 
   if (!event.SerializeToString(&payload)) {
-    error = "official protobuf failed to serialize "
+    error = "Protobuf 序列化失败："
             "FriendEventPayload";
     return false;
   }
@@ -1146,7 +1146,7 @@ bool MySqlDatabase::insert_message_locked(const ChatMessagePayload &payload,
   std::string bytes;
 
   if (!payload.SerializeToString(&bytes)) {
-    error = "official protobuf failed to serialize "
+    error = "Protobuf 序列化失败："
             "ChatMessagePayload";
     return false;
   }
@@ -1202,7 +1202,7 @@ bool MySqlDatabase::add_private_message_with_delivery(
 
   if (payload.type() != chatroom::v7::PRIVATE ||
       payload.recipient_username().empty()) {
-    error = "private delivery requires "
+    error = "私聊投递要求："
             "a private message recipient";
     return false;
   }
@@ -1277,7 +1277,7 @@ bool MySqlDatabase::recent_public_messages(std::size_t count,
 
     if (!message.payload.ParseFromArray(bytes.data(),
                                         static_cast<int>(bytes.size()))) {
-      error = "failed to decode a public "
+      error = "公共消息解码失败："
               "message payload";
       return false;
     }
@@ -1337,7 +1337,7 @@ bool MySqlDatabase::recent_private_messages(
 
     if (!message.payload.ParseFromArray(bytes.data(),
                                         static_cast<int>(bytes.size()))) {
-      error = "failed to decode a private "
+      error = "私聊消息解码失败："
               "message payload";
       return false;
     }
@@ -1398,7 +1398,7 @@ bool MySqlDatabase::pending_private_messages(
 
     if (!message.payload.ParseFromArray(bytes.data(),
                                         static_cast<int>(bytes.size()))) {
-      error = "failed to decode an offline "
+      error = "离线消息解码失败："
               "private message";
       return false;
     }
@@ -1803,7 +1803,7 @@ bool MySqlDatabase::add_group_join_request(const std::string &group_name,
   }
 
   if (!group_id) {
-    error = "group does not exist";
+    error = "群不存在";
     return false;
   }
 
@@ -1965,7 +1965,7 @@ bool MySqlDatabase::approve_group_join_request(const std::string &group_name,
   }
 
   if (!group_id) {
-    error = "group does not exist";
+    error = "群不存在";
     return false;
   }
 
@@ -1984,7 +1984,7 @@ bool MySqlDatabase::approve_group_join_request(const std::string &group_name,
                         nullptr, &affected, error) ||
       affected != 1U) {
     if (error.empty()) {
-      error = "group join request does not exist";
+      error = "入群申请不存在";
     }
 
     rollback();
@@ -2031,7 +2031,7 @@ bool MySqlDatabase::reject_group_join_request(const std::string &group_name,
   }
 
   if (!group_id) {
-    error = "group does not exist";
+    error = "群不存在";
     return false;
   }
 
@@ -2072,7 +2072,7 @@ bool MySqlDatabase::set_group_member_role(const std::string &group_name,
   }
 
   if (!group_id) {
-    error = "group does not exist";
+    error = "群不存在";
     return false;
   }
 
@@ -2114,7 +2114,7 @@ bool MySqlDatabase::remove_group_member(const std::string &group_name,
   }
 
   if (!group_id) {
-    error = "group does not exist";
+    error = "群不存在";
     return false;
   }
 
@@ -2155,7 +2155,7 @@ bool MySqlDatabase::add_group_message(
   std::string bytes;
 
   if (!payload.SerializeToString(&bytes)) {
-    error = "official protobuf failed to serialize "
+    error = "Protobuf 序列化失败："
             "GroupMessagePayload";
     rollback();
     return false;
@@ -2244,7 +2244,7 @@ bool MySqlDatabase::recent_group_messages(
 
     if (!message.payload.ParseFromArray(bytes.data(),
                                         static_cast<int>(bytes.size()))) {
-      error = "failed to decode a group "
+      error = "群消息解码失败："
               "message payload";
       return false;
     }
@@ -2299,7 +2299,7 @@ bool MySqlDatabase::pending_group_messages(
 
     if (!message.payload.ParseFromArray(bytes.data(),
                                         static_cast<int>(bytes.size()))) {
-      error = "failed to decode an offline "
+      error = "离线消息解码失败："
               "group message";
       return false;
     }
@@ -2351,7 +2351,7 @@ bool MySqlDatabase::add_file_transfer(
   ActiveMysqlConnectionScope scope(lease.get());
 
   if (recipients.empty()) {
-    error = "file transfer requires "
+    error = "文件传输要求："
             "at least one recipient";
     return false;
   }
@@ -2359,7 +2359,7 @@ bool MySqlDatabase::add_file_transfer(
   std::string bytes;
 
   if (!metadata.SerializeToString(&bytes)) {
-    error = "official protobuf failed to serialize "
+    error = "Protobuf 序列化失败："
             "FileTransferMetadata";
     return false;
   }
@@ -2483,7 +2483,7 @@ bool MySqlDatabase::pending_file_transfers(
 
     if (!transfer.metadata.ParseFromArray(bytes.data(),
                                           static_cast<int>(bytes.size()))) {
-      error = "official protobuf failed to parse "
+      error = "Protobuf 解析失败："
               "FileTransferMetadata";
       return false;
     }
@@ -2536,7 +2536,7 @@ bool MySqlDatabase::file_transfer_for_recipient(
 
   if (!stored.metadata.ParseFromArray(bytes.data(),
                                       static_cast<int>(bytes.size()))) {
-    error = "official protobuf failed to parse "
+    error = "Protobuf 解析失败："
             "FileTransferMetadata";
     return false;
   }

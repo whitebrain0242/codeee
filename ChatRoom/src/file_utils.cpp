@@ -63,7 +63,7 @@ bool percent_decode(const std::string &encoded, std::string &text,
     }
 
     if (i + 2U >= encoded.size()) {
-      error = "truncated percent escape";
+      error = "百分号编码不完整";
       return false;
     }
 
@@ -72,7 +72,7 @@ bool percent_decode(const std::string &encoded, std::string &text,
     const int low = hex_value(static_cast<unsigned char>(encoded[i + 2U]));
 
     if (high < 0 || low < 0) {
-      error = "invalid percent escape";
+      error = "百分号编码无效";
       return false;
     }
 
@@ -89,19 +89,19 @@ bool sha256_file_hex(const std::filesystem::path &path, std::string &hex_digest,
                      std::string &error) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
-    error = "cannot open file for SHA-256: " + path.string();
+    error = "无法打开文件计算 SHA-256：" + path.string();
     return false;
   }
 
   using ContextPtr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
   ContextPtr context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
   if (!context) {
-    error = "EVP_MD_CTX_new failed";
+    error = "创建 EVP 摘要上下文失败";
     return false;
   }
 
   if (EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1) {
-    error = "EVP_DigestInit_ex failed";
+    error = "初始化 SHA-256 摘要失败";
     return false;
   }
 
@@ -111,19 +111,19 @@ bool sha256_file_hex(const std::filesystem::path &path, std::string &hex_digest,
     const std::streamsize count = input.gcount();
     if (count > 0 && EVP_DigestUpdate(context.get(), buffer.data(),
                                       static_cast<std::size_t>(count)) != 1) {
-      error = "EVP_DigestUpdate failed";
+      error = "更新 SHA-256 摘要失败";
       return false;
     }
   }
   if (!input.eof()) {
-    error = "failed while reading file for SHA-256";
+    error = "计算 SHA-256 时读取文件失败";
     return false;
   }
 
   std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
   unsigned int digest_size = 0;
   if (EVP_DigestFinal_ex(context.get(), digest.data(), &digest_size) != 1) {
-    error = "EVP_DigestFinal_ex failed";
+    error = "完成 SHA-256 摘要失败";
     return false;
   }
 

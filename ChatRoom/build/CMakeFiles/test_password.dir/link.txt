@@ -1,1 +1,0 @@
-/usr/bin/c++ -g CMakeFiles/test_password.dir/tests/test_password.cpp.o CMakeFiles/test_password.dir/src/password.cpp.o -o test_password  /usr/lib/x86_64-linux-gnu/libcrypto.so 

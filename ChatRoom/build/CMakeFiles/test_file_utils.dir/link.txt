@@ -1,1 +1,0 @@
-/usr/bin/c++ -g CMakeFiles/test_file_utils.dir/tests/test_file_utils.cpp.o CMakeFiles/test_file_utils.dir/src/file_utils.cpp.o -o test_file_utils  /usr/lib/x86_64-linux-gnu/libcrypto.so 

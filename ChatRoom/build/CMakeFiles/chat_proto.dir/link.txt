@@ -1,2 +1,0 @@
-/usr/bin/ar qc libchat_proto.a CMakeFiles/chat_proto.dir/generated/friend_event.pb.cc.o CMakeFiles/chat_proto.dir/generated/chat_message.pb.cc.o CMakeFiles/chat_proto.dir/generated/group_message.pb.cc.o CMakeFiles/chat_proto.dir/generated/file_transfer.pb.cc.o
-/usr/bin/ranlib libchat_proto.a

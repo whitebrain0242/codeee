@@ -1,1 +1,0 @@
-/usr/bin/c++ -g CMakeFiles/test_redis_client.dir/tests/test_redis_client.cpp.o CMakeFiles/test_redis_client.dir/src/redis_client.cpp.o -o test_redis_client  /usr/lib/x86_64-linux-gnu/libhiredis.so 
